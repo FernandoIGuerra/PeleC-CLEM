@@ -10,7 +10,7 @@
 
 
 #include "ClemParticles/clem_index_definition.H"
-#include "ClemParticles/clem_numerics_config.H"
+#include "ClemParticles/clem_setup.H"
 
 #include <array>
 //Implementation of diffussion
@@ -22,6 +22,11 @@
 
 namespace clem{
     namespace diffusion{
+
+        // Convenience aliases to reduce repetition in declarations
+        using LemReal   = std::array<amrex::Real, NUM_LEM>;
+        using LemMatrix = std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>;
+
         /**
          * @brief Compute the harmonic mean of two values, with a safeguard against very small values to prevent numerical instability.
          */
@@ -35,43 +40,58 @@ namespace clem{
             }
         }
 
+        /**
+         * Primary template for the thermal diffusion scheme.
+         * Each DiffusionScheme value is fully specialised in clem_diffusion.cpp.
+         * To add a new scheme: add an enum value in clem_numerics_config.H,
+         * write a new explicit specialisation here, and select it in clem_setup.H.
+         */
+        template<DiffusionScheme Scheme>
+        void TemperatureDiffusionScheme(
+                                            LemReal&   mass,
+                                            LemReal&   density,
+                                            LemMatrix& primitives,
+                                            LemMatrix& transport,
+                                            LemMatrix& rhs,
+                                            amrex::Real areaFactor,
+                                            amrex::Real dt);
+
+        // Public entry point — dispatches to TemperatureDiffusionScheme<setup::diffusion_scheme>
         void    TemperatureDiffusionImplementation(
-                                            std::array<amrex::Real, NUM_LEM>& mass,
-                                            std::array<amrex::Real, NUM_LEM>& density,
-                                            std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>& primitives,
-                                            std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>& transport,
-                                            std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>& rhs,
+                                            LemReal&   mass,
+                                            LemReal&   density,
+                                            LemMatrix& primitives,
+                                            LemMatrix& transport,
+                                            LemMatrix& rhs,
                                             const amrex::Real areaFactor,
                                             const amrex::Real dt = 0.0);
 
 
         void    SpeciesDiffusionImplementation(
-                                            std::array<amrex::Real, NUM_LEM>& mass,
-                                            std::array<amrex::Real, NUM_LEM>& density,
-                                            std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>& primitives,
-                                            std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>& transport,
-                                            std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>& rhs,
+                                            LemReal&   mass,
+                                            LemReal&   density,
+                                            LemMatrix& primitives,
+                                            LemMatrix& transport,
+                                            LemMatrix& rhs,
                                             const amrex::Real areaFactor);
-        
-        void CalculationOfTransport(pele::physics::transport::TransParm<pele::physics::PhysicsType::eos_type,pele::physics::PhysicsType::transport_type> const* ltransparm,
-                                    std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>& transport,
-                                    std::array<amrex::Real, NUM_LEM>& density,
-                                    std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>& primitives);
 
-        /**
-         * @brief High-level function to compute both temperature and species diffusion. It first calculates the transport properties, 
-         * then applies the temperature diffusion and finally the species diffusion. The results are accumulated in the rhs container, 
-         * which has NUM_SPECIES + 1 entries (the first NUM_SPECIES for mass fractions and the last one for energy diffusion).
-         */
+        using TransParm = pele::physics::transport::TransParm<
+                              pele::physics::PhysicsType::eos_type,
+                              pele::physics::PhysicsType::transport_type>;
+
+        void CalculationOfTransport(const TransParm* ltransparm,
+                                    LemMatrix& transport,
+                                    LemReal&   density,
+                                    LemMatrix& primitives);
 
         void ComputationOfTemperatureAndSpeciesDiffusion(
-                                            std::array<amrex::Real, NUM_LEM>& mass,
-                                            std::array<amrex::Real, NUM_LEM>& density,
-                                            std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>& primitives,
-                                            std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>& transport,
-                                            std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>& rhs,
+                                            LemReal&   mass,
+                                            LemReal&   density,
+                                            LemMatrix& primitives,
+                                            LemMatrix& transport,
+                                            LemMatrix& rhs,
                                             const amrex::Real areaFactor,
-                                            pele::physics::transport::TransParm<pele::physics::PhysicsType::eos_type,pele::physics::PhysicsType::transport_type> const* ltransparm,
+                                            const TransParm* ltransparm,
                                             const amrex::Real dt = 0.0);
     }
 }

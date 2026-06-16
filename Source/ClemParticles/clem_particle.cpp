@@ -21,6 +21,18 @@
 std::unique_ptr<clem::ClemParticles> PeleC::ClemContainer = nullptr;
 
 namespace clem {
+
+// Per-thread scratch bank for the particle reaction loop.
+// Allocated once per thread; reused for every cell every timestep.
+struct ParticleScratch {
+    diffusion::LemReal   density;
+    diffusion::LemReal   mass;
+    diffusion::LemMatrix conservatives;
+    diffusion::LemMatrix primitives;
+    diffusion::LemMatrix rhs;
+    diffusion::LemMatrix transport;
+};
+static thread_local ParticleScratch tl_pscratch;
     ClemParticles::ClemParticles() {}
     //==================================================
     ClemParticles::ClemParticles  (const amrex::Geometry& geom,
@@ -899,13 +911,15 @@ namespace clem {
                 auto& plist = cell_fab(iv);
                 std::sort(plist.begin(), plist.end(),[&](int a, int b) {return particles[a].idata(IntData::idx)< particles[b].idata(IntData::idx);});
                 
-                //Create an array to store the data 
-                std::array<amrex::Real, NUM_LEM> density{};
-                std::array<amrex::Real, NUM_LEM> mass{};
-                std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM> conservatives{}; //NUM_SPECIES + TEMP               
-                std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM> primitives{}; //NUM_SPECIES + TEMP
-                std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM> rhs{}; //NUM_SPECIES + TEMP
-                std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM> transport{}; //NUM_SPECIES + TEMP
+                // Bind thread-local scratch — density/mass/conservatives/primitives/transport
+                // are fully overwritten below; only rhs is accumulated so zero it here.
+                auto& density      = tl_pscratch.density;
+                auto& mass         = tl_pscratch.mass;
+                auto& conservatives= tl_pscratch.conservatives;
+                auto& primitives   = tl_pscratch.primitives;
+                auto& transport    = tl_pscratch.transport;
+                auto& rhs          = tl_pscratch.rhs;
+                rhs = {};
 
                 //Fill the the main data array with particle data.
                 for(int lem = 0; lem < NUM_LEM; lem++){
