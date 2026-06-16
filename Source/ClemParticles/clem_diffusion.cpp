@@ -73,7 +73,7 @@ static void ComputeEnergySource_O2(
 
         const amrex::Real alphaR = diffusion::SafeHarmonicMean( rhoR * transport[iR][CLEM_dComp_lambda], rho * transport[i][CLEM_dComp_lambda]);
         const amrex::Real alphaL = diffusion::SafeHarmonicMean( rhoL * transport[iL][CLEM_dComp_lambda], rho * transport[i][CLEM_dComp_lambda]);
-        EintSource[i] = rho * (alphaR * (TR - T) - alphaL * (T - TL)) / dm;
+        EintSource[i] = (alphaR * (TR - T) - alphaL * (T - TL)) / dm;
     }
 }
 
@@ -107,7 +107,7 @@ static void ComputeEnergySource_O4(
         const amrex::Real F_R = alphaR * (-TRR + 27.0*TR - 27.0*T  + TL ) * c24 / dm;
         const amrex::Real F_L = alphaL * (-TR  + 27.0*T  - 27.0*TL + TLL) * c24 / dm;
 
-        EintSource[i] = rho * (F_R - F_L);
+        EintSource[i] = F_R - F_L;
     }
 }
 
@@ -169,30 +169,31 @@ static void ComputeSpeciesSource(
     for (int i = 0; i < N; i++) {
         const int iR = (i + 1) % N;
         const int iL = (i - 1 + N) % N;
-        const amrex::Real rho = density[i];
         for (int sp = 0; sp < NUM_SPECIES; sp++) {
             const amrex::Real corr = 0.5*(prim_work[iR][sp]+prim_work[i][sp])*fluxR[i]
                                    - 0.5*(prim_work[iL][sp]+prim_work[i][sp])*fluxL[i];
-            src_Y[i][sp] = (src_Y[i][sp] - corr) * rho;
+            src_Y[i][sp] = src_Y[i][sp] - corr;
         }
-        src_T_sp[i] *= rho;
     }
 }
 
-// r_max: scheme-dependent CFL coefficient (r = alpha*dt/dm^2 <= r_max).
+// r_max: scheme-dependent CFL coefficient.
+// Stability condition for mass-coordinate stencil: dt <= r_max * dm² / (ρ · transport · A²)
 // O2 schemes: r_max = 0.5; O4 scheme: r_max = 3/11.
 static amrex::Real ComputeStableTimestep(
     const diffusion::LemReal&   density,
     const diffusion::LemMatrix& transport,
     amrex::Real dm,
+    amrex::Real areaFactor,
     amrex::Real r_max = 0.5)
 {
+    const amrex::Real A2 = areaFactor * areaFactor;
     amrex::Real beta = 0.0;
     for (int i = 0; i < NUM_LEM; i++) {
         amrex::Real alpha_max = transport[i][CLEM_dComp_lambda];
         for (int sp = 0; sp < NUM_SPECIES; sp++)
             alpha_max = std::max(alpha_max, transport[i][sp]);
-        beta = std::max(beta, alpha_max * density[i]);
+        beta = std::max(beta, density[i] * alpha_max * A2);
     }
     return (beta > 0.0) ? (r_max * dm * dm) / beta : std::numeric_limits<amrex::Real>::max();
 }
@@ -214,7 +215,7 @@ void diffusion::TemperatureDiffusionScheme<DiffusionScheme::O2_Euler>(
     dm /= static_cast<amrex::Real>(N);
 
     const amrex::Real scale  = areaFactor * areaFactor / dm;
-    const amrex::Real dt_cfl = ComputeStableTimestep(density, transport, dm, 0.5);
+    const amrex::Real dt_cfl = ComputeStableTimestep(density, transport, dm, areaFactor, 0.5);
     const int         N_sub  = std::max(1, static_cast<int>(std::ceil(dt / dt_cfl)));
     const amrex::Real dt_sub = dt / static_cast<amrex::Real>(N_sub);
 
@@ -249,7 +250,7 @@ void diffusion::TemperatureDiffusionScheme<DiffusionScheme::O4_Euler>(
 
     const amrex::Real scale  = areaFactor * areaFactor / dm;
     const amrex::Real r_max  = 3.0 / 11.0;
-    const amrex::Real dt_cfl = ComputeStableTimestep(density, transport, dm, r_max);
+    const amrex::Real dt_cfl = ComputeStableTimestep(density, transport, dm, areaFactor, r_max);
     const int         N_sub  = std::max(1, static_cast<int>(std::ceil(dt / dt_cfl)));
     const amrex::Real dt_sub = dt / static_cast<amrex::Real>(N_sub);
 
@@ -286,7 +287,7 @@ void diffusion::TemperatureDiffusionScheme<DiffusionScheme::O2_RK2>(
     dm /= static_cast<amrex::Real>(N);
 
     const amrex::Real scale  = areaFactor * areaFactor / dm;
-    const amrex::Real dt_cfl = ComputeStableTimestep(density, transport, dm, 0.5);
+    const amrex::Real dt_cfl = ComputeStableTimestep(density, transport, dm, areaFactor, 0.5);
     const int         N_sub  = std::max(1, static_cast<int>(std::ceil(dt / dt_cfl)));
     const amrex::Real dt_sub = dt / static_cast<amrex::Real>(N_sub);
 
@@ -405,13 +406,11 @@ void diffusion::SpeciesDiffusionImplementation(
     for (int i = 0; i < N; ++i) {
         const int iR = (i + 1) % N;
         const int iL = (i - 1 + N) % N;
-        const amrex::Real rho = density[i];
         for (int sp = 0; sp < NUM_SPECIES; ++sp) {
             const amrex::Real corr = 0.5*(primitives[iR][sp]+primitives[i][sp])*fluxR[i]
                                    - 0.5*(primitives[iL][sp]+primitives[i][sp])*fluxL[i];
-            Ydot[sp][i] = (Ydot[sp][i] - corr) * rho;
+            Ydot[sp][i] = Ydot[sp][i] - corr;
         }
-        Tdot[i] *= rho;
     }
 
     const amrex::Real scale = areaFactor * areaFactor / dm;
@@ -437,7 +436,7 @@ void diffusion::CalculationOfTransport(
         const amrex::Real T   = primitives[lem][NUM_SPECIES];
         amrex::Real Y[NUM_SPECIES] = {0.0};
         for (int sp = 0; sp < NUM_SPECIES; sp++) Y[sp] = primitives[lem][sp];
-
+        //Here D = rho*D
         amrex::Real Ddiag[NUM_SPECIES]={0.0}, chi[NUM_SPECIES]={0.0};
         amrex::Real mu, xi, lam;
         trans.transport(false, false, true, true, false, T, rho, Y, Ddiag, chi, mu, xi, lam, ltransparm);
@@ -478,7 +477,7 @@ void diffusion::ComputationOfTemperatureAndSpeciesDiffusion(
     dm /= static_cast<amrex::Real>(N);
 
     const amrex::Real scale  = areaFactor * areaFactor / dm;
-    const amrex::Real dt_cfl = ComputeStableTimestep(density, transport, dm, 0.5);
+    const amrex::Real dt_cfl = ComputeStableTimestep(density, transport, dm, areaFactor, 0.5);
     const int         N_sub  = std::max(1, static_cast<int>(std::ceil(dt / dt_cfl)));
     const amrex::Real dt_sub = dt / static_cast<amrex::Real>(N_sub);
 
