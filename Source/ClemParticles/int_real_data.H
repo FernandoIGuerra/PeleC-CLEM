@@ -10,14 +10,14 @@ namespace clem{
     struct RealData
     {
         enum{
-            mass = 0,
-            pressure, //1
-            volume, //2
-            flux, //3// Cosnervatives variables
-            density, //4
-            energy, //rho_eint 5
-            temp, //6  //Species 
-            sp_base,
+            mass = 0, //mass
+            pressure, //1 pressure
+            volume, //2 volume
+            flux, //3// Cosnervatives variables .. Flux
+            density, //4 density
+            energy, //rho_eint 5 ueint
+            temp, //6  //Species  temperature
+            sp_base, 
             ncomps = sp_base + NUM_SPECIES
             };
 
@@ -31,10 +31,10 @@ namespace clem{
     struct IntData
     {       
         enum{ idx = 0, //Relative position within the LemArray 
-                i,     // cell idx (i,j ,k)     
-                j, 
-                k,
-                advected, 
+                i,     // cell idx (i,j ,k)     i
+                j,      //j
+                k,      //k
+                advected, // is advected
                 ncomps};
     };
 }

@@ -165,6 +165,12 @@ ifeq ($(shell test 0$(PELEC_NUM_AUX) -gt 0; echo $$?), 0)
   DEFINES+=-DNUM_AUX=$(PELEC_NUM_AUX)
 endif
 
+# LEM diffusion scheme: 0=O2/Euler, 1=O4/Euler, 2=O2/RK2, 3=O2/CFL-substep (default)
+# Override at build time: make CLEM_DIFF_SCHEME=0
+ifdef CLEM_DIFF_SCHEME
+  DEFINES+=-DCLEM_DIFF_SCHEME=$(CLEM_DIFF_SCHEME)
+endif
+
 Bpack += $(foreach dir, $(Pdirs), $(AMREX_HOME)/Src/$(dir)/Make.package)
 Blocs += $(foreach dir, $(Pdirs), $(AMREX_HOME)/Src/$(dir))
 

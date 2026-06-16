@@ -10,7 +10,7 @@
 
 
 #include "ClemParticles/clem_index_definition.H"
-
+#include "ClemParticles/clem_numerics_config.H"
 
 #include <array>
 //Implementation of diffussion
@@ -41,7 +41,8 @@ namespace clem{
                                             std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>& primitives,
                                             std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>& transport,
                                             std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>& rhs,
-                                            const amrex::Real areaFactor);
+                                            const amrex::Real areaFactor,
+                                            const amrex::Real dt = 0.0);
 
 
         void    SpeciesDiffusionImplementation(
@@ -70,7 +71,8 @@ namespace clem{
                                             std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>& transport,
                                             std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>& rhs,
                                             const amrex::Real areaFactor,
-                                            pele::physics::transport::TransParm<pele::physics::PhysicsType::eos_type,pele::physics::PhysicsType::transport_type> const* ltransparm);
+                                            pele::physics::transport::TransParm<pele::physics::PhysicsType::eos_type,pele::physics::PhysicsType::transport_type> const* ltransparm,
+                                            const amrex::Real dt = 0.0);
     }
 }
 

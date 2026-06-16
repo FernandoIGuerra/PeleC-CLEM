@@ -483,7 +483,7 @@ PeleC::PeleC(
     ClemContainer = std::make_unique<clem::ClemParticles>(geom, dm, grids);
     ClemContainer->SetPhysBC(phys_bc);
     ClemContainer->InitParticles();
-    ClemContainer->WritePlotFile("plt_initialization_particles", "particles");
+    ClemContainer->WritePlotFileNamed("plt_initialization_particles", "particles");
     amrex::Print() << " ----------- Redistribute ----------- " << std::endl;
     ClemContainer->Redistribute();
     amrex::Print() << " ----------- DefineOwnership ----------- " << std::endl;

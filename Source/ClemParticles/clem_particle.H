@@ -39,7 +39,9 @@ namespace clem{
             //Particle Generator
             void InitParticles();
 
-            void DefineOwnershipParticleMesh();
+            void WritePlotFileNamed(const std::string& dir, const std::string& name) const;
+
+            void DefineOwnershipParticleMesh(bool update_particle_after_advection = false);
             
             void UpdateIndexAfterAdvection();
 
@@ -57,15 +59,8 @@ namespace clem{
                     m_hi_bc[dir] = bc.hi(dir);
                 }
             }
-
-            void MoveParticles();
             
             void DoIsentropicPressureChange(amrex::MultiFab& Pressure);
-            
-            ParticleType CreateParticleTypeDefault(int index_lem, amrex::IntVect iv, const amrex::Real* plo, const amrex::Real* dx, amrex::Real dx_inner);
-
-            ParticleType CreateParticleAdvectionTypeDefault(amrex::IntVect iv, const amrex::Real* plo, const amrex::Real* dx, const amrex::Real flux_out, const ParticleType& p_in);
-
             
             void CreateParticleBeforeRegridding();
                

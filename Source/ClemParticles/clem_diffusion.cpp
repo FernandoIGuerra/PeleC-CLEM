@@ -2,59 +2,276 @@
 #include "ClemParticles/clem_diffusion.H"
 #include <TransportParams.H>
 #include "ClemParticles/clem_index_definition.H"
+#include <limits>
+#include <cmath>
 
 namespace clem{
-        void diffusion::TemperatureDiffusionImplementation(
+
+// -----------------------------------------------------------------------
+// Internal helpers — one per spatial/time scheme.  Only the one selected
+// by CLEM_DIFF_SCHEME is compiled into the final binary.
+// -----------------------------------------------------------------------
+
+#if CLEM_DIFF_SCHEME == CLEM_DIFF_SCHEME_O2_EULER   || \
+    CLEM_DIFF_SCHEME == CLEM_DIFF_SCHEME_O2_RK2     || \
+    CLEM_DIFF_SCHEME == CLEM_DIFF_SCHEME_O2_SUBSTEP
+
+// Compute the per-particle energy flux divergence using the 2nd-order
+// central-difference stencil.  Result written into EintSource[N].
+static void ComputeEnergySource_O2(
+    const std::array<amrex::Real, NUM_LEM>&                                density,
+    const std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>&   T_field,
+    const std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>&   transport,
+    amrex::Real dm,
+    std::array<amrex::Real, NUM_LEM>&                                       EintSource)
+{
+    constexpr int N = NUM_LEM;
+    for (int i = 0; i < N; i++) {
+        const int iR = (i + 1) % N;
+        const int iL = (i - 1 + N) % N;
+
+        const amrex::Real rho  = density[i];
+        const amrex::Real rhoR = density[iR];
+        const amrex::Real rhoL = density[iL];
+
+        const amrex::Real T  = T_field[i][NUM_SPECIES];
+        const amrex::Real TR = T_field[iR][NUM_SPECIES];
+        const amrex::Real TL = T_field[iL][NUM_SPECIES];
+
+        const amrex::Real gamma  = rho  * transport[i][CLEM_dComp_lambda];
+        const amrex::Real gammaR = rhoR * transport[iR][CLEM_dComp_lambda];
+        const amrex::Real gammaL = rhoL * transport[iL][CLEM_dComp_lambda];
+
+        const amrex::Real alphaR = diffusion::SafeHarmonicMean(gammaR, gamma);
+        const amrex::Real alphaL = diffusion::SafeHarmonicMean(gammaL, gamma);
+
+        // 2nd-order face fluxes:  F = alpha * dT/dm
+        const amrex::Real F_R = alphaR * (TR - T) / dm;
+        const amrex::Real F_L = alphaL * (T - TL) / dm;
+
+        EintSource[i] = rho * (F_R - F_L);
+    }
+}
+#endif // O2 stencil needed
+
+#if CLEM_DIFF_SCHEME == CLEM_DIFF_SCHEME_O4_EULER
+
+// Compute the per-particle energy flux divergence using the 4th-order
+// accurate face-flux stencil (conservative form).
+//
+// 4th-order first derivative at face i+1/2:
+//   (dT/dm) = (-T_{i+2} + 27T_{i+1} - 27T_i + T_{i-1}) / (24*dm)
+//
+// Stability note: the maximum eigenvalue of the O4 Laplacian is larger
+// than the O2 one, so the stability limit tightens to r <= 3/11 ≈ 0.27.
+static void ComputeEnergySource_O4(
+    const std::array<amrex::Real, NUM_LEM>&                                density,
+    const std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>&   T_field,
+    const std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>&   transport,
+    amrex::Real dm,
+    std::array<amrex::Real, NUM_LEM>&                                       EintSource)
+{
+    constexpr int N = NUM_LEM;
+    constexpr amrex::Real c24 = 1.0 / 24.0;
+
+    for (int i = 0; i < N; i++) {
+        const int iR  = (i + 1) % N;
+        const int iRR = (i + 2) % N;
+        const int iL  = (i - 1 + N) % N;
+        const int iLL = (i - 2 + N) % N;
+
+        const amrex::Real rho  = density[i];
+        const amrex::Real rhoR = density[iR];
+        const amrex::Real rhoL = density[iL];
+
+        const amrex::Real T   = T_field[i][NUM_SPECIES];
+        const amrex::Real TR  = T_field[iR][NUM_SPECIES];
+        const amrex::Real TRR = T_field[iRR][NUM_SPECIES];
+        const amrex::Real TL  = T_field[iL][NUM_SPECIES];
+        const amrex::Real TLL = T_field[iLL][NUM_SPECIES];
+
+        // Harmonic-mean transport at nearest-neighbour faces (same as O2)
+        const amrex::Real gamma  = rho  * transport[i][CLEM_dComp_lambda];
+        const amrex::Real gammaR = rhoR * transport[iR][CLEM_dComp_lambda];
+        const amrex::Real gammaL = rhoL * transport[iL][CLEM_dComp_lambda];
+
+        const amrex::Real alphaR = diffusion::SafeHarmonicMean(gammaR, gamma);
+        const amrex::Real alphaL = diffusion::SafeHarmonicMean(gammaL, gamma);
+
+        // 4th-order face gradient:  (-T_{i+2}+27T_{i+1}-27T_i+T_{i-1})/(24*dm)
+        const amrex::Real F_R = alphaR * (-TRR + 27.0*TR - 27.0*T + TL)  * c24 / dm;
+        const amrex::Real F_L = alphaL * (-TR  + 27.0*T  - 27.0*TL + TLL)* c24 / dm;
+
+        EintSource[i] = rho * (F_R - F_L);
+    }
+}
+#endif // O4 stencil needed
+
+#if CLEM_DIFF_SCHEME == CLEM_DIFF_SCHEME_O2_SUBSTEP
+
+// Compute the CFL-stable diffusion sub-step size.
+//
+// beta = max_i( rho_i * max(lambda/Cp, D_sp) ) — the largest effective
+// mass-space diffusivity weighted by density, matching the stability analysis
+// of the 3-point explicit stencil:  dt_cfl = dm^2 / (2 * beta).
+//
+// transport[i][sp]            = D_sp      (or rho*D_sp from PelePhysics)
+// transport[i][CLEM_dComp_lambda] = lambda/Cp = rho*alpha_T
+// Both already carry the rho factor so we multiply by density[i] again
+// to get rho^2*alpha, matching the "beta = D*rho^2" formula in getTimeCFL.
+static amrex::Real ComputeStableTimestep(
+    const std::array<amrex::Real, NUM_LEM>&                                density,
+    const std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>&   transport,
+    amrex::Real dm)
+{
+    amrex::Real beta = 0.0;
+    for (int i = 0; i < NUM_LEM; i++) {
+        amrex::Real alpha_max = transport[i][CLEM_dComp_lambda];
+        for (int sp = 0; sp < NUM_SPECIES; sp++)
+            alpha_max = std::max(alpha_max, transport[i][sp]);
+        beta = std::max(beta, alpha_max * density[i]);
+    }
+    return (beta > 0.0) ? (dm * dm) / (2.0 * beta)
+                        : std::numeric_limits<amrex::Real>::max();
+}
+
+#endif // SUBSTEP helper
+
+// -----------------------------------------------------------------------
+// Public function: dispatch to the compile-time selected scheme
+// -----------------------------------------------------------------------
+    void diffusion::TemperatureDiffusionImplementation(
                                             std::array<amrex::Real, NUM_LEM>& mass,
                                             std::array<amrex::Real, NUM_LEM>& density,
                                             std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>& primitives,
                                             std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>& transport,
                                             std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>& rhs,
-                                            const amrex::Real areaFactor)
+                                            const amrex::Real areaFactor,
+                                            const amrex::Real dt)
     {
         constexpr int N = NUM_LEM;
-        // Compute average mass factor (like dm)
+
         amrex::Real dm = 0.0;
-        for (int i = 0; i < N; i++) dm  += mass[i];
-        dm                              /= static_cast<amrex::Real>(N);
+        for (int i = 0; i < N; i++) dm += mass[i];
+        dm /= static_cast<amrex::Real>(N);
 
-        std::vector<amrex::Real> EintSource(N, 0.0);
+        const amrex::Real scale = areaFactor * areaFactor / dm;
 
-        // Loop over LEMs and compute thermal diffusion
+        std::array<amrex::Real, NUM_LEM> EintSource{};
+
+#if CLEM_DIFF_SCHEME == CLEM_DIFF_SCHEME_O2_EULER
+
+        ComputeEnergySource_O2(density, primitives, transport, dm, EintSource);
+        for (int i = 0; i < N; i++)
+            rhs[i][NUM_SPECIES] += EintSource[i] * scale;
+
+#elif CLEM_DIFF_SCHEME == CLEM_DIFF_SCHEME_O4_EULER
+
+        ComputeEnergySource_O4(density, primitives, transport, dm, EintSource);
+        for (int i = 0; i < N; i++)
+            rhs[i][NUM_SPECIES] += EintSource[i] * scale;
+
+#elif CLEM_DIFF_SCHEME == CLEM_DIFF_SCHEME_O2_RK2
+
+        // Heun's method (explicit RK2) for the diffusion operator only.
+        // Transport coefficients are frozen at T^n throughout both stages.
+        //
+        // Stage 1: stencil at T^n → EintSource1
+        // Predictor: T^* = T^n + dt * EintSource1 * scale / (rho * Cv)
+        // Stage 2: stencil at T^* → EintSource2
+        // Corrector: rhs += 0.5*(EintSource1 + EintSource2) * scale
+
+        auto eos = pele::physics::PhysicsType::eos();
+
+        // --- Stage 1 ---
+        std::array<amrex::Real, NUM_LEM> EintSource2{};
+        ComputeEnergySource_O2(density, primitives, transport, dm, EintSource);
+
+        // Build predictor temperature array (working copy of primitives)
+        std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM> prim_star = primitives;
+
         for (int i = 0; i < N; i++) {
-            int iR = (i + 1) % N;       // right neighbor
-            int iL = (i - 1 + N) % N;   // left neighbor
+            amrex::Real massfrac[NUM_SPECIES];
+            for (int sp = 0; sp < NUM_SPECIES; sp++)
+                massfrac[sp] = primitives[i][sp];
 
-            // Densities
-            amrex::Real rho  = density[i];
-            amrex::Real rhoR = density[iR];
-            amrex::Real rhoL = density[iL];
+            amrex::Real Cv = 0.0;
+            eos.TY2Cv(primitives[i][NUM_SPECIES], massfrac, Cv);
 
-            // Temperatures
-            amrex::Real T  = primitives[i][NUM_SPECIES];
-            amrex::Real TR = primitives[iR][NUM_SPECIES];
-            amrex::Real TL = primitives[iL][NUM_SPECIES];
+            // dT/dt from the diffusion operator
+            const amrex::Real dTdt = (Cv > 0.0)
+                ? EintSource[i] * scale / (density[i] * Cv)
+                : 0.0;
 
-            // Transport coefficients
-            amrex::Real gamma  = rho*transport[i][CLEM_dComp_lambda];
-            amrex::Real gammaR = rhoR*transport[iR][CLEM_dComp_lambda];
-            amrex::Real gammaL = rhoL*transport[iL][CLEM_dComp_lambda];
-
-            // Harmonic-averaged diffusivity
-            amrex::Real alphaR = SafeHarmonicMean(gammaR, gamma);
-            amrex::Real alphaL = SafeHarmonicMean(gammaL, gamma);
-
-            // Fluxes
-            amrex::Real F_R = alphaR * (TR - T) / dm;
-            amrex::Real F_L = alphaL * (T - TL) / dm;
-
-            // Store energy source
-            EintSource[i] = rho * (F_R - F_L);
+            prim_star[i][NUM_SPECIES] = primitives[i][NUM_SPECIES] + dt * dTdt;
         }
 
-        for (int i = 0; i < N; i++) {
-            rhs[i][NUM_SPECIES] += EintSource[i] * areaFactor * areaFactor / dm;
-        }  
+        // --- Stage 2 ---
+        ComputeEnergySource_O2(density, prim_star, transport, dm, EintSource2);
+
+        // --- Corrector: average the two stages ---
+        for (int i = 0; i < N; i++)
+            rhs[i][NUM_SPECIES] += 0.5 * (EintSource[i] + EintSource2[i]) * scale;
+
+#elif CLEM_DIFF_SCHEME == CLEM_DIFF_SCHEME_O2_SUBSTEP
+
+        // CFL-based sub-stepping with 2nd-order spatial stencil.
+        //
+        // Algorithm:
+        //   1. Compute dt_cfl from the diffusion stability condition.
+        //   2. Take N_sub = ceil(dt / dt_cfl) explicit Euler steps of size
+        //      dt_sub = dt / N_sub using a LOCAL copy of the temperature field.
+        //      Species and density are frozen (transport coefficients frozen too).
+        //   3. At each sub-step accumulate EintSource.
+        //   4. The averaged EintSource is passed to rhs so the reactor applies
+        //      the correct total energy change over the full dt:
+        //        delta(rho*e)_diff = dt * avg_rate = dt_sub * sum(EintSource_k) * scale
+        //
+        // This scheme is unconditionally stable for any dt and more accurate
+        // than the single frozen-rate approach for large Courant numbers.
+
+        auto eos = pele::physics::PhysicsType::eos();
+
+        const amrex::Real dt_cfl = ComputeStableTimestep(density, transport, dm);
+        const int N_sub = std::max(1, static_cast<int>(std::ceil(dt / dt_cfl)));
+        const amrex::Real dt_sub = dt / static_cast<amrex::Real>(N_sub);
+
+        // Working copy of primitives — only temperature column is updated
+        std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM> prim_work = primitives;
+
+        // Accumulated EintSource across all sub-steps
+        std::array<amrex::Real, NUM_LEM> EintSource_sum{};
+
+        for (int sub = 0; sub < N_sub; sub++) {
+            std::array<amrex::Real, NUM_LEM> EintSource_sub{};
+            ComputeEnergySource_O2(density, prim_work, transport, dm, EintSource_sub);
+
+            for (int i = 0; i < N; i++) {
+                // Advance local temperature: dT/dt = EintSource * scale / (rho * Cv)
+                amrex::Real massfrac[NUM_SPECIES];
+                for (int sp = 0; sp < NUM_SPECIES; sp++)
+                    massfrac[sp] = primitives[i][sp];   // species frozen at T^n
+
+                amrex::Real Cv = 0.0;
+                eos.TY2Cv(prim_work[i][NUM_SPECIES], massfrac, Cv);
+
+                const amrex::Real dTdt = (density[i] * Cv > 0.0)
+                    ? EintSource_sub[i] * scale / (density[i] * Cv)
+                    : 0.0;
+
+                prim_work[i][NUM_SPECIES] += dt_sub * dTdt;
+                EintSource_sum[i]         += EintSource_sub[i];
+            }
+        }
+
+        // Pass the time-averaged rate so the reactor applies the correct delta(rho*e)
+        const amrex::Real inv_Nsub = 1.0 / static_cast<amrex::Real>(N_sub);
+        for (int i = 0; i < N; i++)
+            rhs[i][NUM_SPECIES] += EintSource_sum[i] * inv_Nsub * scale;
+
+#else
+#error "Unknown CLEM_DIFF_SCHEME value — set 0, 1, 2, or 3 in clem_numerics_config.H"
+#endif
     }
 
     void diffusion::SpeciesDiffusionImplementation(
@@ -213,11 +430,14 @@ namespace clem{
                                             std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>& transport,
                                             std::array<std::array<amrex::Real, NUM_SPECIES + 1>, NUM_LEM>& rhs,
                                             const amrex::Real areaFactor,
-                                            pele::physics::transport::TransParm<pele::physics::PhysicsType::eos_type,pele::physics::PhysicsType::transport_type> const* ltransparm)
+                                            pele::physics::transport::TransParm<pele::physics::PhysicsType::eos_type,pele::physics::PhysicsType::transport_type> const* ltransparm,
+                                            const amrex::Real dt)
     {
         CalculationOfTransport(ltransparm, transport, density, primitives);
-        TemperatureDiffusionImplementation(mass, density, primitives, transport, rhs, areaFactor);
-        SpeciesDiffusionImplementation(mass,density,primitives,transport,rhs,areaFactor);
+        //This is the dt super grid(LES)
+        //Iteration over the CFL conditioned time usign teh subgrid properties.
+        TemperatureDiffusionImplementation(mass, density, primitives, transport, rhs, areaFactor, dt);
+        SpeciesDiffusionImplementation(mass, density, primitives, transport, rhs, areaFactor);
     }
     
 }

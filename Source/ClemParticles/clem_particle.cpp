@@ -32,7 +32,23 @@ namespace clem {
         FluxFaces.define(grid, dm, number_faces, 4);
     }
 
-    
+    void
+    ClemParticles::WritePlotFileNamed(const std::string& dir, const std::string& name) const
+    {
+        amrex::Vector<std::string> real_names = {
+            "mass", "pressure", "volume", "flux", "density", "energy", "temp"
+        };
+        amrex::Vector<std::string> spec_names;
+        pele::physics::eos::speciesNames<pele::physics::PhysicsType::eos_type>(spec_names);
+        for (const auto& sn : spec_names) {
+            real_names.push_back("Y_" + sn);
+        }
+        const amrex::Vector<std::string> int_names = {
+            "idx", "i", "j", "k", "advected"
+        };
+        WritePlotFile(dir, name, real_names, int_names);
+    }
+
     /**
     @brief Particles allocation in the domain
     */
@@ -72,18 +88,21 @@ namespace clem {
     @brief : PArticles are linked to the cell that they belong to
     */
     void
-    ClemParticles::DefineOwnershipParticleMesh()
+    ClemParticles::DefineOwnershipParticleMesh(bool update_particles_after_advection)
     {
-        const int lev = 0;
-        if (m_cell_vector_updated) return;
 
+        const int lev = 0;
+        //We will evaluate later when should we avoid this
+        //if (m_cell_vector_updated) return;
+
+        //We clean all the ownership relations
         for(amrex::MFIter mfi = MakeMFIter(lev, false); mfi.isValid(); ++mfi){
             const int grid_id           = mfi.index();
             auto& fab = m_cell_vectors[grid_id];
             fab.resize(mfi.validbox());
             fab.setVal(std::vector<int>{});
         }
-        amrex::Print() << "Particle ownership mesh defined" << std::endl;
+
         //Here the particles are associated to a cell 
         for(MyPartIter pti(*this, lev); pti.isValid(); ++pti){
             const int np                    = pti.numParticles();
@@ -96,19 +115,16 @@ namespace clem {
             {
                 //To a bf(i,j,k) is append the index of a particle
                 ParticleType& p             = particles[pindex];
-                if(p.rdata(RealData::mass) > 0.0001){
-                    amrex::Print() << "Particle mass: " << p.rdata(RealData::mass) << " Particle ID: " << p.idata(IntData::idx) << " Position: " << p.idata(IntData::i) << ", " << p.idata(IntData::j) << std::endl;
-                } 
-                amrex::IntVect iv           = this->Index(p, lev); //Get the index from the position
-                AMREX_ASSERT(m_cell_vectors[grid_id].box().contains(iv));
+                amrex::IntVect iv           = this->Index(p, lev); //Get the index from the position i = (x/dx) 
                 m_cell_vectors[grid_id](iv).push_back(pindex); //add to each cell the belonging cells
             }
 
         }
         m_cell_vector_updated = true;
-        //WritePlotFile("plt_particle_ownership", "particles");
         //This is a general algorthmin that sort the particles according to their index and flux 
-        UpdateIndexAfterAdvection();
+
+        if (update_particles_after_advection){   
+            UpdateIndexAfterAdvection();}
     }
 
     /*
@@ -116,7 +132,7 @@ namespace clem {
     */
     void
     ClemParticles::UpdateIndexAfterAdvection(){
-        amrex::Print() << "Updating particle index after advection" << std::endl;
+
         const int lev                   = 0;
         const auto& geom                = Geom(lev);
         const auto* dx                  = geom.CellSize();
@@ -127,20 +143,20 @@ namespace clem {
         {
             const int grid_id               = pti.index();
             const int tile_id               = pti.LocalTileIndex();
-
             auto& cell_fab                  = m_cell_vectors[grid_id];
             auto& particle_tile             = GetParticles(lev)[{grid_id, tile_id}];
             auto& particles                 = particle_tile.GetArrayOfStructs();
             const amrex::Box& bx            = pti.validbox();
-            //amrex::Print() << "Processing grid: " << grid_id << " with box: " << bx << std::endl;
+
+
             for(amrex::IntVect iv = bx.smallEnd(); iv <= bx.bigEnd(); bx.next(iv)){
                 auto& plist         = cell_fab(iv);
                 int plist_size        = plist.size();
                 
                 auto mid_it         = std::stable_partition(plist.begin(), plist.end(),[&](int idx){ return particles[idx].idata(IntData::advected) == 0; });
 
-                //Split the particle that already belong to the list adn the advected one.
-                //the advected one separate by flux values first with the highest abd flux
+                //Split the particle that already belong to the list and the advected one.
+                //the advected one separate by flux values first with the highest flux
                 // if more than 1 cell are advected then order whith respect the index they have
                 //Example p1.flux = 25 with idx 8 p2.flux = 25 with idx 7 p3.flux = 20 with idx 5
                 //ORder     p1, p2, p3 since p1 and p2 have the same flux but p1 has higher index than p2
@@ -243,7 +259,6 @@ namespace clem {
                     p.rdata(RealData::temp)     = T;
 
                     for(int sp = 0; sp < NUM_SPECIES ; sp++){
-                        //amrex::Print() << RealData::SP(sp) << "  " << massfrac[sp] << std::endl;
                         p.rdata(RealData::SP(sp)) = massfrac[sp];
                     }
                 }
@@ -316,25 +331,21 @@ namespace clem {
         const amrex::IntVect& lo_bc = m_lo_bc;
         const amrex::IntVect& hi_bc = m_hi_bc;
 
-        AMREX_ASSERT(m_cell_vector_updated);
-
         for(MyPartIter pti(*this, lev); pti.isValid(); ++pti){
             const int grid_id           = pti.index();
             const int tile_id           = pti.LocalTileIndex();
-
             auto& flux_arr              = FluxFaces[grid_id];
             auto& cell_fab              = m_cell_vectors[grid_id];
-            //inflow implementation - ghost cells of this grid hold the bcnormal inflow Dirichlet state
-            const auto state_arr        = state_bc[grid_id].const_array();
-
+            const auto state_arr        = state_bc[grid_id].const_array();  //inflow implementation - ghost cells of this grid hold the bcnormal inflow Dirichlet state
             const amrex::Box& bx        = pti.validbox();
             auto& particle_tile         = GetParticles(lev)[std::make_pair(grid_id, tile_id)];
             auto& particles             = particle_tile.GetArrayOfStructs();
+
             amrex::Vector<ParticleType> new_particles;
 
             for (amrex::IntVect iv = bx.smallEnd(); iv <= bx.bigEnd(); bx.next(iv))
-            {
-                //amrex::Print() << "Processing cell: " << iv << std::endl;
+            {   
+                // CALCULATION OF THE FLUXES
                 constexpr int numFaces                          = AMREX_SPACEDIM == 2 ? 4 : 6 ;
                 advection::FluxDir fluxes[]                     = { {flux_arr(iv, 0)* dt, advection::Face::Left},
                                                                     {flux_arr(iv, 1)* dt, advection::Face::Right},
@@ -358,19 +369,23 @@ namespace clem {
                 std::sort(std::begin(fluxes), std::end(fluxes),[](const advection::FluxDir& a, const advection::FluxDir& b) {return a.flux > b.flux;});
 
                 for(int iface = 0; iface < numFaces; iface++){
+
                     const advection::Face face          = fluxes[iface].face;
                     const amrex::Real net_flux          = fluxes[iface].flux;
+                    const amrex::IntVect dst            = advection::neighbor_iv(iv, face);
+                    const amrex::IntVect src            = iv;
 
-                    const amrex::IntVect dst     = advection::neighbor_iv(iv, face);
-                    const amrex::IntVect src     = iv;
+                    //We only advect outwards across faces with negative (outgoing) flux. 
+                    //Positive (incoming) flux is supplied by the neighbour cell as ITS outflow.
 
-                    //We only advect outwards across faces with negative (outgoing) flux. Positive (incoming) flux is supplied by the neighbour cell as ITS outflow...
-                    //For the inflow check is the clel is a next to the BC
+                    //INFLOW BOUNDARY CONDITIONS: For the inflow check is the clel is a next to the BC
                     if (net_flux >= 0.0) {
                         //inflow implementation - ...except at a domain inflow boundary, where there is no interior neighbour to provide the mass.
                         //There the mass flows from OUTSIDE in: the source is the ghost cell (outside the domain) and the destination is the
                         //boundary cell iv (inside). We create a new particle in iv carrying the incoming mass with the LES ghost-cell (bcnormal) fluid state.
-                        if (net_flux > 0.0 && boundaryCondition::is_inflow_boundary_face(dst, domain, is_periodic, lo_bc, hi_bc))
+                        //Guard: dst outside domain ⟹ iv is the adjacent boundary cell.
+                        //Interior cells always have dst inside the domain so they can never inject inflow particles.
+                        if (net_flux > 0.0 && !domain.contains(dst) && boundaryCondition::is_inflow_boundary_face(dst, domain, is_periodic, lo_bc, hi_bc))
                         {
                             //the outward neighbour across an inflow boundary face is the ghost cell that holds the incoming-fluid state
                             const amrex::IntVect ghost_src = dst;
@@ -432,7 +447,6 @@ namespace clem {
 
 
                     amrex::Real flux_counter    = std::abs(net_flux);
-                    //amrex::Print() << "Advection across face: " << static_cast<int>(face) << " with flux: " << net_flux << " index src: " << src << "  index des" << dst << std::endl;
 
                     while(flux_counter > 0.0 ){
                         //If the particle has not enough mass to complete the flux, then is fully advected
@@ -498,7 +512,6 @@ namespace clem {
 
 
                             p_in.rdata(RealData::mass)     -= flux_counter;
-                            //amrex::Print() << "Mass of the original particle after splitting: " << p_in.rdata(RealData::mass) << " Mass of the new particle: " << p_out.rdata(RealData::mass) << std::endl;
                             new_particles.push_back(p_out);
                             flux_counter = 0.0;
                             break;
@@ -507,12 +520,12 @@ namespace clem {
                 } //iterate over faces
             } //iv loop
 
+            //ADD ALL NEW PARTICLES
             for (auto& p : new_particles) {
                 particle_tile.push_back(p);
             }
+
         }//MPIter
-        //flag to update the mapping grids and mesh
-        m_cell_vector_updated = false;
     }
 
     void
@@ -551,18 +564,16 @@ namespace clem {
     }//DoIsentropicPressureChange
 
 
-    /*
-    @brief This method creates a total number of particles euqla to NUM_LEM per cell.
-    This is previous the DoRegridding function
-    */
+    /**
+     * @brief This method creates a total number of particles euqla to NUM_LEM per cell. This is previous the DoRegridding function
+     */
     void 
     ClemParticles::CreateParticleBeforeRegridding(){
         const int lev                   = 0;
         const auto& geom                = Geom(lev);
         const auto* dx                  = geom.CellSize();
         const auto* plo                 = geom.ProbLo();
-        //     *  *  *          That why diviosn by N+1 lem element
-        // -> --------- <-
+        // locate the particle
         const amrex::Real dx_inner      = dx[0] / static_cast<amrex::Real>(NUM_LEM + 1);
 
         for(MyPartIter pti(*this, lev); pti.isValid(); ++pti){ 
@@ -593,8 +604,6 @@ namespace clem {
                         particle.id()      = ParticleType::NextID();
                         particle.cpu()     = amrex::ParallelDescriptor::MyProc();
                         particle_functionalities::SetParticleWithDefaultValues(iv, plo, dx, dx_inner, index_lem, particle);
-                        //amrex::Print() << "Creating particle with index: " << index_lem << std::endl;
-                        //ParticleType  p = CreateParticleTypeDefault(index_lem, iv, plo, dx, dx_inner);
                         particle_tile.push_back(particle);
                     }
                     //add particles until size = NUM_LEM
@@ -608,23 +617,20 @@ namespace clem {
     ClemParticles::DoRegridding(){
         auto eos                    = pele::physics::PhysicsType::eos();
 
+        //Fill all LES cells with NUM_LEM particles
         CreateParticleBeforeRegridding();
-        amrex::Print() << "Finish creating particles before regridding" << std::endl;
+        //Particles are distributed between ranks
         Redistribute();
-        amrex::Print() << "Finish Redistribute" << std::endl;
+        //We defined 
         DefineOwnershipParticleMesh();
-        amrex::Print() << "Finish DefineOwnershipParticleMesh" << std::endl;
 
         //WritePlotFile("plt_Regridding_previous", "particles");
         const int lev                   = 0;
         const auto& geom                = Geom(lev);
         const auto* dx                  = geom.CellSize();
         const auto* plo                 = geom.ProbLo();
-        //     *  *  *          That why diviosn by N+1 lem element
-        // -> --------- <-
-        const amrex::Real dx_inner      = dx[0] / static_cast<amrex::Real>(NUM_LEM + 1);
 
-        AMREX_ASSERT(m_cell_vector_updated);
+        const amrex::Real dx_inner      = dx[0] / static_cast<amrex::Real>(NUM_LEM + 1);
 
         for(MyPartIter pti(*this, lev); pti.isValid(); ++pti){ 
             const int grid_id           = pti.index();
@@ -635,12 +641,10 @@ namespace clem {
             auto& particles             = particle_tile.GetArrayOfStructs();
 
             constexpr int number_of_variable = NUM_SPECIES + 5; //5 is for mass, pressure, volume, density and temp
-            //Scratch buffer reused across cells via resize() to avoid per-cell heap allocations
-            amrex::Vector<amrex::Real> particles_data;
+            amrex::Vector<amrex::Real> particles_data;          //Scratch buffer reused across cells via resize() to avoid per-cell heap allocations
 
-            //amrex::Print() << "Starting regridding procedure for cell: " << bx << std::endl;
+
             for(amrex::IntVect iv = bx.smallEnd(); iv <= bx.bigEnd();  bx.next(iv)){
-                //amrex::Print() << "Regridding cell: " << iv << std::endl;
                 auto& plist         = cell_fab(iv);
                 std::sort(plist.begin(), plist.end(),[&](int a, int b) {return particles[a].idata(IntData::idx)< particles[b].idata(IntData::idx);});
                 
@@ -649,7 +653,6 @@ namespace clem {
 
                 //Verification if the index are well sortex 
                 for (int n = 0; n < numberOfLem; ++n) {
-                    //if(n == 9) amrex::Print() << "Number of particle in the cell: " << numberOfLem << std::endl;
                     const int pidx = plist[n];
                     const int idx  = particles[pidx].idata(IntData::idx);
                     AMREX_ASSERT_WITH_MESSAGE(idx == n, "Particle indices are not sorted correctly before regridding");
@@ -685,7 +688,8 @@ namespace clem {
                     }
                 }
 
-                //Set all particles values = 0.0 to avoid to use them during the regridding procedure. We will fill only until NUM_LEM, the rest of particles will be deleted at the end
+                //Set all particles values = 0.0 to avoid to use them during the regridding procedure. 
+                //We will fill only until NUM_LEM, the rest of particles will be deleted at the end
                 for(const int pidx : plist){
                     ParticleType& p = particles[pidx];
                     p.rdata(RealData::mass)     = 0.0;
@@ -706,20 +710,20 @@ namespace clem {
 
                     ParticleType& p_target = particles[plist[idx_target]];
 
-                    amrex::Real mass_source = particles_data[idx_source*number_of_variable + 0];
-                    amrex::Real mass_need   = new_dm - p_target.rdata(RealData::mass);
-                    const amrex::Real src_density = particles_data[idx_source*number_of_variable + 3];
-                    //amrex::Print()<< "Source idx: " << idx_source << " Target idx: " << idx_target << " Mass source: " << mass_source << " Mass need: " << mass_need << std::endl;
+                    amrex::Real mass_source         = particles_data[idx_source*number_of_variable + 0];
+                    amrex::Real mass_need           = new_dm - p_target.rdata(RealData::mass);
+                    const amrex::Real src_density   = particles_data[idx_source*number_of_variable + 3];
+
                     if(mass_source >= mass_need && mass_need > 0.0){
                         //Store the sata in the particle target
-                        //FIrst step just accumualte, alter we will divide by the new mass to have the mass average
+                        //First step just accumualte, alter we will divide by the new mass to have the mass average
                         //Mass fraction are stores in particles_data in primitive form
                         const amrex::Real vol_need = (src_density > 0.0) ? mass_need / src_density : 0.0; //avoid 0/0 from zero-density placeholder particles
                         p_target.rdata(RealData::mass)     += mass_need;
-                        p_target.rdata(RealData::pressure) += particles_data[idx_source*number_of_variable + 1]*mass_need;
+                        p_target.rdata(RealData::pressure) += particles_data[idx_source*number_of_variable + 1] * mass_need;
                         p_target.rdata(RealData::volume)   += vol_need;
                         p_target.rdata(RealData::density)  = (p_target.rdata(RealData::volume) > 0.0) ? p_target.rdata(RealData::mass) / p_target.rdata(RealData::volume) : 0.0;
-                        p_target.rdata(RealData::temp)     += particles_data[idx_source*number_of_variable + 4]*mass_need;
+                        p_target.rdata(RealData::temp)     += particles_data[idx_source*number_of_variable + 4] * mass_need;
 
                         for(int sp = 0; sp < NUM_SPECIES; sp++){
                             p_target.rdata(RealData::SP(sp)) += particles_data[idx_source*number_of_variable + 5 + sp] * mass_need;
@@ -749,9 +753,11 @@ namespace clem {
                     }
                 }
 
-                //HEre we verify that the particle_data is empty
-                for(int i = 0; i < numberOfLem; i++){
-                    AMREX_ASSERT_WITH_MESSAGE(particles_data[i*number_of_variable + 0] == 0.0, "Not all the mass from the source particle has been used during the regridding procedure");
+                //Here we verify that the particle_data is empty
+                constexpr amrex::Real eps = 1e-15; 
+                for (int i = 0; i < numberOfLem; ++i) {
+                    amrex::Real val = particles_data[i * number_of_variable + 0];
+                    AMREX_ASSERT_WITH_MESSAGE(std::abs(val) < eps,"Mass not fully consumed; residual = " << val);
                 }
                 
                 //Here we perfom mass average for the target particle, since during the regridding procedure we accumulate the mass 
@@ -778,10 +784,11 @@ namespace clem {
                 //needd to update ueint
                 for(int i = 0; i < NUM_LEM; i++){
                     ParticleType& p                     = particles[plist[i]];
+                    if(p.rdata(RealData::mass) == 0.0) continue; // placeholder; will be deleted below
                     amrex::Real massfrac[NUM_SPECIES]   = {0.0};
 
                     amrex::Real rho         = p.rdata(RealData::density);
-                    amrex::Real one_rho     = 1.0/p.rdata(RealData::density);
+                    amrex::Real one_rho     = (rho > 0.0) ? 1.0/rho : 0.0;
                     amrex::Real T           = p.rdata(RealData::temp);
                     amrex::Real energy      = 0.0;
 
@@ -798,10 +805,10 @@ namespace clem {
                     ParticleType& p = particles[plist[i]];
                     //amrex::Print()<< "Particle " << i << " mass: " << p.rdata(RealData::mass) << std::endl;
                     if(p.rdata(RealData::mass) == 0.0){ 
-                        //mark the particle for deletion by setting its index to a value higher than NUM_LEM, since we know that only particles with index lower than NUM_LEM are used during the regridding procedure
                         p.id() = -p.id(); //mark for deletion
                     }
                 }
+
                 //Reset the position and index of the stading aprticles
                 for(int i = 0; i < NUM_LEM; i++){
                     ParticleType& p = particles[plist[i]];
@@ -815,26 +822,10 @@ namespace clem {
 
                 for(int i = 0 ; i<NUM_LEM; i++){
                     ParticleType& p = particles[plist[i]];
-                    //amrex::Print()<< "Particle " << i << " mass: " << p.rdata(RealData::mass) << std::endl;
-                    if(p.rdata(RealData::mass) > 1.0){
-                        amrex::Print()<< "Mass: " << p.rdata(RealData::mass) << " Pressure: " << p.rdata(RealData::pressure) << " Volume: " << p.rdata(RealData::volume) << " Density: " << p.rdata(RealData::density) << " Temp: " << p.rdata(RealData::temp) << std::endl;
-                    }
                     AMREX_ASSERT_WITH_MESSAGE(p.rdata(RealData::mass) - new_dm < 1e-12, "Particle is not similar as the predicted new dm after the regridding procedure");
-                    AMREX_ASSERT_WITH_MESSAGE(p.rdata(RealData::mass)  < 1, "mass cannot be more than 1");
                 }
             }//bx iv
         }//mfi iter
-
-
-
-
-        amrex::Print() << "Regridding procedure done for all the cells " << std::endl;
-        Redistribute();
-        amrex::Print() << "Resdistribute " << std::endl;
-        //WritePlotFile("plt_Regridding_Intermediate", "particles");
-        amrex::Print() << "Regridding procedure done for all the cells " << std::endl;
-        
-
     }//DoRegridding
 
     void
@@ -867,26 +858,18 @@ namespace clem {
 
         //Step 8 and 9
         //isentropic pressure change
-
         functionalities::ComputePressureFromMultiFab(PSuperGrid, S_new);
         DoIsentropicPressureChange(PSuperGrid);
-        //amrex::Print() << " ......... Isentropic pressure change" << std::endl;
-        //WritePlotFile("plt_PIsentropic", "particles");
 
-        amrex::ParallelDescriptor::Barrier();//-------------------------------------------------
+        amrex::ParallelDescriptor::Barrier();
         //step 10
         //Regridding
         Redistribute();
-        //amrex::Print() << " ......... Redistribute" << std::endl;
         DoRegridding();
-        //amrex::Print() << " ......... Do Regridding" << std::endl;
         Redistribute();
-        //amrex::Print() << " ......... Redistribute" << std::endl;
         DefineOwnershipParticleMesh();
-        amrex::ParallelDescriptor::Barrier();//-------------------------------------------------
-        //amrex::Print() << " ......... Regridding" << std::endl;
-        //WritePlotFile("plt_Regridding", "particles");
-        
+        WritePlotFileNamed("plt_AfterRegridding", "particles");
+        amrex::ParallelDescriptor::Barrier();
         //Step 11
         //Calculation or current omega
         GetCurrentAmountOfMassSpecies(OldAmountOfMassSpecies);
@@ -931,7 +914,7 @@ namespace clem {
                 }
 
                 //computes the diffusion and fill the transport array
-                diffusion::ComputationOfTemperatureAndSpeciesDiffusion(mass, density, primitives, transport, rhs, areaFactor, ltransparm);
+                diffusion::ComputationOfTemperatureAndSpeciesDiffusion(mass, density, primitives, transport, rhs, areaFactor, ltransparm, dt);
 
                 amrex::Real current_time = 0.0;
                 reactor->reactClemParticles(primitives, conservatives, rhs, density, dt, current_time
@@ -949,7 +932,7 @@ namespace clem {
                 //Diagnostic: dump the post-reaction LEM state for the suspected cell so the
                 //evolution of mass/species/temp can be tracked across the steps where the
                 //instability develops. Remove once the root cause is identified.
-                if (iv == amrex::IntVect(AMREX_D_DECL(29,0,0))) {
+                if (iv == amrex::IntVect(AMREX_D_DECL(0,29,0))) {
                     for(int lem = 0; lem < NUM_LEM; lem++){
                         ParticleType& p = particles[plist[lem]];
                         amrex::Print() << "[CLEM-debug] cell " << iv
@@ -971,9 +954,7 @@ namespace clem {
         }
         //step 22
         GetCurrentAmountOfMassSpecies(NewAmountOfMassSpecies);
-        //amrex::Print() << " ......... Computation New Mass Species" << std::endl;
         functionalities::ComputeOmegaFiltered(NewAmountOfMassSpecies, OldAmountOfMassSpecies, OmegaFiltered, dt);
-        //amrex::Print() << " ......... Computation Omega Filtered" << std::endl;
 
         //Step 23
         //outflow implementation - ParticlesAdvection marks particles that leave through outflow boundaries (id = -1); Redistribute() then purges them
@@ -981,16 +962,10 @@ namespace clem {
         ParticlesAdvection(dt, Sborder);
         Redistribute();
         DefineOwnershipParticleMesh();
-
-        //WritePlotFile("plt_AdvectionAfter", "particles");
         UpdateIndexAfterAdvection();
-        //WritePlotFile("plt_Advection", "particles");
-        //amrex::Print() << " ......... Particle Advection" << std::endl;
 
         //Step 25
         functionalities::UpdatePeleCDataFromCLEM(OmegaFiltered, NewAmountOfMassSpecies, S_old, S_new, nonReactSrc, reactSrc, dt);
-        //amrex::Print() << " ......... Super-grid Update" << std::endl;
-        //amrex::Print() << "..... Reaction Finished" << std::endl;
-        WritePlotFile("plt_AfterDoClem", "particles");
+        WritePlotFileNamed("plt_AfterDoClem", "particles");
     }//DoClem,
 }

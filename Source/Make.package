@@ -67,6 +67,7 @@ CEXE_headers += ClemParticles/clem_index_definition.H
 CEXE_headers += ClemParticles/int_real_data.H
 CEXE_headers += ClemParticles/particle_functionalities.H
 CEXE_headers += ClemParticles/clem_diffusion.H
+CEXE_headers += ClemParticles/clem_numerics_config.H
 CEXE_headers += ClemPArticles/clem_regridding_utils.H
 
 ifeq ($(USE_PARTICLES), TRUE)
