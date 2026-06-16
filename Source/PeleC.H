@@ -26,6 +26,9 @@
 #include "EBStencilTypes.H"
 #include "DiagBase.H"
 
+//CLEM PARTICLES -- 
+#include "ClemParticles/clem_particle.H"
+
 enum StateType { State_Type = 0, Reactions_Type, Work_Estimate_Type };
 
 // Create storage for all source terms.
@@ -197,7 +200,7 @@ public:
   // Number of source terms in temporary spray data
   static int num_spray_src;
 
-  static std::unique_ptr<SprayParticleContainer> SprayPC;
+  c
   static std::unique_ptr<SprayParticleContainer> VirtPC;
   static std::unique_ptr<SprayParticleContainer> GhostPC;
 #endif
@@ -520,6 +523,9 @@ public:
   void getMOLSrcTerm(
     const amrex::MultiFab& S,
     amrex::MultiFab& MOLSrcTerm,
+#if DO_CLEM_PARTICLE
+  amrex::MultiFab& CellFluxTerm,
+#endif
     amrex::Real time,
     amrex::Real dt,
     amrex::Real flux_factor);
@@ -693,6 +699,13 @@ protected:
   // Non-hydro source terms.
   amrex::Vector<std::unique_ptr<amrex::MultiFab>> old_sources;
   amrex::Vector<std::unique_ptr<amrex::MultiFab>> new_sources;
+
+
+  // CLem mesh
+  //static std::unique_ptr<SprayParticleContainer> SprayPC;
+  static std::unique_ptr<clem::ClemParticles> ClemContainer;
+  clem::ClemParticles& getClemParticles(){return *ClemContainer;}
+
 
   std::unique_ptr<pele::physics::reactions::ReactorBase> reactor;
   void init_reactor();

@@ -1,10 +1,15 @@
 #include "Diffusion.H"
 #include "prob.H"
+#include "ClemParticles/clem_index_definition.H"
+
 
 void
 PeleC::getMOLSrcTerm(
   const amrex::MultiFab& S,
   amrex::MultiFab& MOLSrcTerm,
+#if DO_CLEM_PARTICLE
+  amrex::MultiFab& CellFluxTerm,
+#endif
   const amrex::Real /*time*/,
   const amrex::Real dt,
   const amrex::Real reflux_factor)
@@ -17,12 +22,11 @@ PeleC::getMOLSrcTerm(
     return;
   }
 
-  bool using_rf = do_rf;
-  amrex::Real omega = rf_omega;
-  int axis = rf_axis;
-  amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> axis_loc = {
-    AMREX_D_DECL(rf_axis_x, rf_axis_y, rf_axis_z)};
-  const auto dx = geom.CellSizeArray();
+  bool using_rf         = do_rf;
+  amrex::Real omega     = rf_omega;
+  int axis              = rf_axis;
+  amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> axis_loc = {AMREX_D_DECL(rf_axis_x, rf_axis_y, rf_axis_z)};
+  const auto dx         = geom.CellSizeArray();
 
   /*
      Across all conserved state components, compute the method of lines rhs
@@ -65,14 +69,12 @@ PeleC::getMOLSrcTerm(
      sure what are the consequences of that.
   */
 
-  const int nCompTr = dComp_lambda + 1;
-  const amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> dxinv =
-    geom.InvCellSizeArray();
+  const int nCompTr                                         = dComp_lambda + 1;
+  const amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> dxinv  = geom.InvCellSizeArray();
 
-  auto const& fact =
-    dynamic_cast<amrex::EBFArrayBoxFactory const&>(S.Factory());
-  auto const& flags = fact.getMultiEBCellFlagFab();
-  amrex::MultiFab* cost = nullptr;
+  auto const& fact        =  dynamic_cast<amrex::EBFArrayBoxFactory const&>(S.Factory());
+  auto const& flags       = fact.getMultiEBCellFlagFab();
+  amrex::MultiFab* cost   = nullptr;
 
   if (do_mol_load_balance) {
     cost = &(get_new_data(Work_Estimate_Type));
@@ -82,21 +84,22 @@ PeleC::getMOLSrcTerm(
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
   {
-    for (amrex::MFIter mfi(MOLSrcTerm, amrex::TilingIfNotGPU()); mfi.isValid();
-         ++mfi) {
-      const amrex::Box vbox = mfi.tilebox();
-      int ng = numGrow();
-      const amrex::Box gbox = amrex::grow(vbox, ng);
-      const amrex::Box cbox = amrex::grow(vbox, ng - 1);
-      auto const& MOLSrc = MOLSrcTerm.array(mfi);
+    for (amrex::MFIter mfi(MOLSrcTerm, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+      const amrex::Box vbox   = mfi.tilebox();
+      int ng                  = numGrow();
+      const amrex::Box gbox   = amrex::grow(vbox, ng);
+      const amrex::Box cbox   = amrex::grow(vbox, ng - 1);
+      auto const& MOLSrc      = MOLSrcTerm.array(mfi);
+      auto const& CellFlux    = CellFluxTerm.array(mfi);
+      amrex::Real wt          = amrex::ParallelDescriptor::second();
+      const auto& flag_fab    = flags[mfi];
+      amrex::FabType typ      = flag_fab.getType(vbox); //Return which type of cell 1 covered, 2 regular or cut cell
 
-      amrex::Real wt = amrex::ParallelDescriptor::second();
-      const auto& flag_fab = flags[mfi];
-      amrex::FabType typ = flag_fab.getType(vbox);
       if (typ == amrex::FabType::covered) {
         setV(vbox, NVAR, MOLSrc, 0);
+
         if (do_mol_load_balance && (cost != nullptr)) {
-          wt = (amrex::ParallelDescriptor::second() - wt) / vbox.d_numPts();
+          wt  =   (amrex::ParallelDescriptor::second() - wt) / vbox.d_numPts();
           (*cost)[mfi].plus<amrex::RunOn::Device>(wt, vbox);
         }
         continue;
@@ -104,36 +107,35 @@ PeleC::getMOLSrcTerm(
       // Note on typ: if interior cells (vbox) are all covered, no need to
       // do anything. But otherwise, we need to do EB stuff if there are any
       // cut cells within 1 grow cell (cbox) due to EB redistribute
-      typ = flag_fab.getType(cbox);
+      typ                         = flag_fab.getType(cbox);
+      const amrex::Box ebfluxbox  = amrex::grow(vbox, 3);
 
-      const amrex::Box ebfluxbox = amrex::grow(vbox, 3);
+      const int local_i   = mfi.LocalIndex();
+      const auto Ncut     = (!eb_in_domain)
+                              ? 0 : static_cast<int>(sv_eb_bndry_grad_stencil[local_i].size());
 
-      const int local_i = mfi.LocalIndex();
-      const auto Ncut =
-        (!eb_in_domain)
-          ? 0
-          : static_cast<int>(sv_eb_bndry_grad_stencil[local_i].size());
       SparseData<amrex::Real, EBBndrySten> eb_flux_thdlocal;
+
       if (Ncut > 0) {
         eb_flux_thdlocal.define(sv_eb_bndry_grad_stencil[local_i], NVAR);
       }
-      auto* d_sv_eb_bndry_geom =
-        (Ncut > 0 ? sv_eb_bndry_geom[local_i].data() : nullptr);
 
-      const int nqaux = NQAUX > 0 ? NQAUX : 1;
+      auto* d_sv_eb_bndry_geom  =  (Ncut > 0 ? sv_eb_bndry_geom[local_i].data() : nullptr);
+      const int nqaux           = NQAUX > 0 ? NQAUX : 1;
+
       amrex::FArrayBox q(gbox, QVAR, amrex::The_Async_Arena());
       amrex::FArrayBox qaux(gbox, nqaux, amrex::The_Async_Arena());
       amrex::FArrayBox coeff_cc(gbox, nCompTr, amrex::The_Async_Arena());
-      auto const& sar = S.array(mfi);
-      auto const& qar = q.array();
-      auto const& qauxar = qaux.array();
+      auto const& sar     = S.array(mfi);
+      auto const& qar     = q.array();
+      auto const& qauxar  = qaux.array();
 
       // Get primitives, Q, including (Y, T, p, rho) from conserved state
       {
         const auto geomdata = geom.data();
         BL_PROFILE("PeleC::ctoprim()");
-        amrex::ParallelFor(
-          gbox, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+        amrex::ParallelFor(gbox, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+
             if (using_rf) {
               amrex::IntVect iv(AMREX_D_DECL(i, j, k));
               amrex::Real rad = get_rotaxis_dist(iv, axis, axis_loc, geomdata);
@@ -180,94 +182,91 @@ PeleC::getMOLSrcTerm(
       // Compute transport coefficients, coincident with Q
       auto const& coe_cc = coeff_cc.array();
       {
-        auto const& qar_yin = q.array(QFS);
-        auto const& qar_Tin = q.array(QTEMP);
-        auto const& qar_rhoin = q.array(QRHO);
-        auto const& coe_rhoD = coeff_cc.array(dComp_rhoD);
-        auto const& coe_mu = coeff_cc.array(dComp_mu);
-        auto const& coe_xi = coeff_cc.array(dComp_xi);
-        auto const& coe_lambda = coeff_cc.array(dComp_lambda);
+        auto const& qar_yin       = q.array(QFS);
+        auto const& qar_Tin       = q.array(QTEMP);
+        auto const& qar_rhoin     = q.array(QRHO);
+        auto const& coe_rhoD      = coeff_cc.array(dComp_rhoD);
+        auto const& coe_mu        = coeff_cc.array(dComp_mu);
+        auto const& coe_xi        = coeff_cc.array(dComp_xi);
+        auto const& coe_lambda    = coeff_cc.array(dComp_lambda);
+
         BL_PROFILE("PeleC::get_transport_coeffs()");
-        auto const* ltransparm = trans_parms.device_parm();
-        auto const& geomdata = geom.data();
+        auto const* ltransparm          = trans_parms.device_parm();
+        auto const& geomdata            = geom.data();
         const ProbParmDevice* lprobparm = PeleC::d_prob_parm_device;
-        const bool get_xi = true, get_mu = true, get_lam = true,
-                   get_Ddiag = true, get_chi = false;
-        amrex::ParallelFor(
-          gbox, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+
+        const bool get_xi = true, get_mu = true, get_lam = true, get_Ddiag = true, get_chi = false;
+        amrex::ParallelFor(gbox, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+
             amrex::Real muloc, xiloc, lamloc;
             amrex::Real Ddiag[NUM_SPECIES], Y[NUM_SPECIES] = {0.0};
             amrex::Real* chi_mix = nullptr;
             amrex::Real T = qar_Tin(i, j, k);
             amrex::Real rho = qar_rhoin(i, j, k);
+
             for (int n = 0; n < NUM_SPECIES; ++n) {
               Y[n] = qar_yin(i, j, k, n);
             }
 
-            const amrex::RealVect x =
-              pc_cmp_loc({AMREX_D_DECL(i, j, k)}, geomdata);
+            const amrex::RealVect x = pc_cmp_loc({AMREX_D_DECL(i, j, k)}, geomdata);
             pc_transcoeff(
-              get_xi, get_mu, get_lam, get_Ddiag, get_chi, T, rho, Y, Ddiag,
-              chi_mix, muloc, xiloc, lamloc, ltransparm, *lprobparm, x);
+                          get_xi, get_mu, get_lam, get_Ddiag, get_chi, T, rho, Y, Ddiag,
+                          chi_mix, muloc, xiloc, lamloc, ltransparm, *lprobparm, x);
 
             for (int n = 0; n < NUM_SPECIES; ++n) {
               coe_rhoD(i, j, k, n) = Ddiag[n];
             }
-            coe_mu(i, j, k) = muloc;
-            coe_xi(i, j, k) = xiloc;
-            coe_lambda(i, j, k) = lamloc;
+            coe_mu(i, j, k)       = muloc;
+            coe_xi(i, j, k)       = xiloc;
+            coe_lambda(i, j, k)   = lamloc;
           });
       }
 
+      //Until here q_arr and transport variables are computed
+
       amrex::FArrayBox flux_ec[AMREX_SPACEDIM];
-      const amrex::Box eboxes[AMREX_SPACEDIM] = {AMREX_D_DECL(
-        amrex::surroundingNodes(cbox, 0), amrex::surroundingNodes(cbox, 1),
-        amrex::surroundingNodes(cbox, 2))};
+      //in each direction is created a ebox whith 
+      const amrex::Box eboxes[AMREX_SPACEDIM] = {AMREX_D_DECL(amrex::surroundingNodes(cbox, 0), amrex::surroundingNodes(cbox, 1), amrex::surroundingNodes(cbox, 2))};
+      
       amrex::GpuArray<amrex::Array4<amrex::Real>, AMREX_SPACEDIM> flx;
-      const amrex::GpuArray<
-        const amrex::Array4<const amrex::Real>, AMREX_SPACEDIM>
-        area_arr{{AMREX_D_DECL(
-          area[0].array(mfi), area[1].array(mfi), area[2].array(mfi))}};
+      const amrex::GpuArray<const amrex::Array4<const amrex::Real>, AMREX_SPACEDIM>
+                                                area_arr{{AMREX_D_DECL(area[0].array(mfi), area[1].array(mfi), area[2].array(mfi))}};
+
       for (int dir = 0; dir < AMREX_SPACEDIM; dir++) {
         flux_ec[dir].resize(eboxes[dir], NVAR, amrex::The_Async_Arena());
-        flx[dir] = flux_ec[dir].array();
+        flx[dir]          = flux_ec[dir].array();
         setV(eboxes[dir], NVAR, flx[dir], 0);
       }
 
       amrex::FArrayBox Dfab(cbox, NVAR, amrex::The_Async_Arena());
-      auto const& Dterm = Dfab.array();
+      auto const& Dterm     = Dfab.array();
       setV(cbox, NVAR, Dterm, 0.0);
-      auto flag_arr = flags.const_array(mfi);
+      auto flag_arr         = flags.const_array(mfi);
 
       {
         // Compute Extensive diffusion fluxes for X, Y, Z
         BL_PROFILE("PeleC::diffusion_flux()");
         const bool l_transport_harmonic_mean = transport_harmonic_mean;
         for (int dir = 0; dir < AMREX_SPACEDIM; dir++) {
-          if (
-            (typ == amrex::FabType::singlevalued) ||
-            (typ == amrex::FabType::regular)) {
-            amrex::ParallelFor(
-              eboxes[dir], [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+          if ((typ == amrex::FabType::singlevalued) || (typ == amrex::FabType::regular)) {
+
+            amrex::ParallelFor(eboxes[dir], [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+
                 amrex::GpuArray<amrex::Real, dComp_lambda + 1> cf = {0.0};
-                if (
-                  flag_arr(i, j, k).isRegular() ||
-                  flag_arr(i, j, k).isSingleValued()) {
+                if (flag_arr(i, j, k).isRegular() || flag_arr(i, j, k).isSingleValued()) {
+
                   for (int n = 0; n < static_cast<int>(cf.size()); n++) {
-                    pc_move_transcoefs_to_ec(
-                      AMREX_D_DECL(i, j, k), n, coe_cc, cf.data(), dir,
-                      l_transport_harmonic_mean);
+                    pc_move_transcoefs_to_ec(AMREX_D_DECL(i, j, k), n, coe_cc, cf.data(), dir,l_transport_harmonic_mean);
                   }
                 }
                 if (typ == amrex::FabType::singlevalued) {
-                  pc_diffusion_flux_eb(
-                    i, j, k, qar, cf, flag_arr, area_arr[dir], flx[dir], dxinv,
-                    dir);
+                  pc_diffusion_flux_eb(i, j, k, qar, cf, flag_arr, area_arr[dir], flx[dir], dxinv,dir);
+
                 } else if (typ == amrex::FabType::regular) {
-                  pc_diffusion_flux(
-                    i, j, k, qar, cf, area_arr[dir], flx[dir], dxinv, dir);
+                  pc_diffusion_flux(i, j, k, qar, cf, area_arr[dir], flx[dir], dxinv, dir);
                 }
               });
+
           } else if (typ == amrex::FabType::multivalued) {
             amrex::Abort("multi-valued cells are not supported");
           }
@@ -352,20 +351,18 @@ PeleC::getMOLSrcTerm(
           diffusion_flux_arr;
         if (use_explicit_filter) {
           for (int dir = 0; dir < AMREX_SPACEDIM; dir++) {
-            diffusion_flux[dir].resize(
-              flux_ec[dir].box(), NVAR, amrex::The_Async_Arena());
+
+            diffusion_flux[dir].resize(flux_ec[dir].box(), NVAR, amrex::The_Async_Arena());
             diffusion_flux_arr[dir] = diffusion_flux[dir].array();
-            copy_array4(
-              flux_ec[dir].box(), flux_ec[dir].nComp(), flx[dir],
-              diffusion_flux_arr[dir]);
+
+            copy_array4(flux_ec[dir].box(), flux_ec[dir].nComp(), flx[dir],diffusion_flux_arr[dir]);
           }
         }
 
         { // Get face-centered hyperbolic fluxes
           BL_PROFILE("PeleC::pc_hyp_mol_flux()");
-          pc_compute_hyp_mol_flux(
-            cbox, qar, qauxar, flx, area_arr, plm_iorder, use_laxf_flux,
-            flags.array(mfi), geom, axis_loc, omega, axis, using_rf);
+          pc_compute_hyp_mol_flux(cbox, qar, qauxar,CellFlux, flx, area_arr, plm_iorder, use_laxf_flux,
+                                  flags.array(mfi), geom, axis_loc, omega, axis, using_rf);
         }
 
         // Filter hydro fluxes

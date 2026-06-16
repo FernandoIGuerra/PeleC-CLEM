@@ -7,6 +7,9 @@
 #include "SprayParticles.H"
 #endif
 
+//CLEM PARTICLES -- 
+#include "ClemParticles/clem_particle.H"
+
 amrex::Real
 PeleC::advance(
   amrex::Real time, amrex::Real dt, int amr_iteration, int amr_ncycle)
@@ -97,7 +100,18 @@ PeleC::do_mol_advance(
 
   FillPatcherFill(Sborder, 0, NVAR, nGrow_FP_border, time, State_Type, 0);
   amrex::Real reflux_factor = 0.5;
-  getMOLSrcTerm(Sborder, molSrc, time, dt, reflux_factor);
+  amrex::MultiFab& CellHydroFluxes = getClemParticles().getFluxContainer();
+  CellHydroFluxes.setVal(0.0); // Set all values 0
+  
+  //S^n = F_A(u^n) + F_d(u^n)
+
+  getMOLSrcTerm(Sborder, molSrc, 
+    #ifdef DO_CLEM_PARTICLE
+    CellHydroFluxes,
+    #endif
+    time, dt, reflux_factor);
+
+
 
   // Build other (non-diffusion) sources at t_old
   for (int src : src_list) {
@@ -110,19 +124,27 @@ PeleC::do_mol_advance(
   }
 
   if (mol_iters > 1) {
+    //copy molSrc_old(dst) <- molSrc(src) 
     amrex::MultiFab::Copy(molSrc_old, molSrc, 0, 0, NVAR, 0);
   }
 
   // U^* = U^n + dt*S^n
-  amrex::MultiFab::LinComb(S_new, 1.0, Sborder, 0, dt, molSrc, 0, 0, NVAR, 0);
+  //S_new = stores U^*
+  amrex::MultiFab::LinComb(S_new, 1.0, Sborder, 0, 
+                                  dt, molSrc, 0, 
+                                  0, NVAR, 0);
 
   // U^{n+1,*} = U^n + dt*S^n + dt*I_R
+  //Here the reaction term is accumualted
   if (do_react) {
     amrex::MultiFab::Saxpy(S_new, dt, I_R, 0, FirstSpec, NUM_SPECIES, 0);
     amrex::MultiFab::Saxpy(S_new, dt, I_R, NUM_SPECIES, Eden, 1, 0);
   }
 
   computeTemp(S_new, 0);
+  //###############################################################################################################
+  //                                      Here U^* is fully calculated
+  //###############################################################################################################
 
   // Compute S^{n+1} = MOLRhs(U^{n+1,*})
   if (verbose != 0) {
@@ -131,13 +153,21 @@ PeleC::do_mol_advance(
 
   FillPatcherFill(Sborder, 0, NVAR, nGrow_FP_border, time + dt, State_Type, 0);
   reflux_factor = mol_iters > 1 ? 0 : 0.5;
-  getMOLSrcTerm(Sborder, molSrc, time, dt, reflux_factor);
+
+  getMOLSrcTerm(Sborder, molSrc, 
+    #ifdef DO_CLEM_PARTICLE
+    CellHydroFluxes,
+    #endif
+    time, dt, reflux_factor);
+
+  // F(AD) = 0.5 ( S^n + S^(n+1) )
+  //THen the flux at every face afeter the two iteraction must the average of the precition and correction
+  CellHydroFluxes.mult(0.5, 1); //Perform average accounting for 1 goht cell
 
   // Build other (non-diffusion) sources at t_new
   for (int src : src_list) {
     if (src != diff_src) {
       construct_new_source(src, time + dt, dt, amr_iteration, amr_ncycle, 0, 0);
-
       // add sources to molsrc
       amrex::MultiFab::Saxpy(molSrc, 1.0, *new_sources[src], 0, 0, NVAR, 0);
     }
@@ -146,26 +176,48 @@ PeleC::do_mol_advance(
   // U^{n+1.**} = 0.5*(U^n + U^{n+1,*}) + 0.5*dt*S^{n+1} = U^n + 0.5*dt*S^n +
   // 0.5*dt*S^{n+1} + 0.5*dt*I_R
   amrex::MultiFab::LinComb(S_new, 0.5, Sborder, 0, 0.5, S_old, 0, 0, NVAR, 0);
-  amrex::MultiFab::Saxpy(
-    S_new, 0.5 * dt, molSrc, 0, 0, NVAR,
-    0); //  NOTE: If I_R=0, we are done and U_new is the final new-time state
+  amrex::MultiFab::Saxpy(S_new, 0.5 * dt, molSrc, 0, 0, NVAR,0); 
+  //  NOTE: If I_R=0, we are done and U_new is the final new-time state
 
   if (do_react) {
     amrex::MultiFab::Saxpy(S_new, 0.5 * dt, I_R, 0, FirstSpec, NUM_SPECIES, 0);
     amrex::MultiFab::Saxpy(S_new, 0.5 * dt, I_R, NUM_SPECIES, Eden, 1, 0);
 
-    // F_{AD} = (1/dt)(U^{n+1,**} - U^n) - I_R = 0.5*(S^{n}+S^{n+1}(which is a
-    // guess!))
-    amrex::MultiFab::LinComb(
-      molSrc, 1.0 / dt, S_new, 0, -1.0 / dt, S_old, 0, 0, NVAR, 0);
+    // F_{AD} = (1/dt)(U^{n+1,**} - U^n) - I_R = 0.5*(S^{n}+S^{n+1}(which is aguess!))
+    amrex::MultiFab::LinComb(molSrc, 1.0 / dt, S_new, 0, -1.0 / dt, S_old, 0, 0, NVAR, 0);
     amrex::MultiFab::Subtract(molSrc, I_R, 0, FirstSpec, NUM_SPECIES, 0);
     amrex::MultiFab::Subtract(molSrc, I_R, NUM_SPECIES, Eden, 1, 0);
 
     // Compute I_R and U^{n+1} = U^n + dt*(F_{AD} + I_R)
-    react_state(time, dt, false, &molSrc);
+#if DO_CLEM_PARTICLE
+    amrex::Print() << "... CLEM : Computing reactions for dt = " << dt << std::endl;
+      amrex::MultiFab& react_src                                        = get_new_data(Reactions_Type);
+      react_src.setVal(0.0);
+      auto* ltransparm                                                  = trans_parms.device_parm();
+      pele::physics::reactions::ReactorBase* reactor                    = PeleC::reactor.get();
+      amrex::Print() << "..... CLEM: Particule Distribution between ranks and Ownership defintion" << std::endl;
+      ClemContainer->Redistribute();
+      ClemContainer->DefineOwnershipParticleMesh();
+      amrex::Print() << " ###############################################################################"  << std::endl;
+      amrex::Print() << ".....  CLEM: Diffusion,Reaction, and Calcualtion of omega filtered" << std::endl;
+      //inflow implementation - Sborder ghost cells (FillPatched at t+dt) carry the bcnormal inflow state used to build incoming particles
+      ClemContainer->DoClem(ltransparm, reactor, react_src, dt, molSrc, S_old, S_new, Sborder);
+      amrex::Print() << ".....  CLEM: Operation Terminated" << std::endl;
+      amrex::Print() << " ###############################################################################" << std::endl;
+      CellHydroFluxes.setVal(0.0);
+#else
+      // Compute I_R and U^{n+1} = U^n + dt*(F_{AD} + I_R)
+      react_state(time, dt, false, &molSrc);
+#endif
+
   }
 
   computeTemp(S_new, 0);
+
+#if DO_CLEM_PARTICLE
+  //TODO: How to implements a second itreation for this model!!
+  return dt;
+#endif
 
   if (do_react) {
     for (int mol_iter = 2; mol_iter <= mol_iters; ++mol_iter) {
@@ -174,18 +226,28 @@ PeleC::do_mol_advance(
                        << mol_iter << " of " << mol_iters << ")" << std::endl;
       }
 
-      FillPatcherFill(
-        Sborder, 0, NVAR, nGrow_FP_border, time + dt, State_Type, 0);
+      FillPatcherFill(Sborder, 0, NVAR, nGrow_FP_border, time + dt, State_Type, 0);
       reflux_factor = mol_iter == mol_iters ? 0.5 : 0;
+      #if !DO_CLEM_PARTICLE
       getMOLSrcTerm(Sborder, molSrc_new, time, dt, reflux_factor);
-
+      #endif
       // F_{AD} = (1/2)(molSrc_old + molSrc_new)
-      amrex::MultiFab::LinComb(
-        molSrc, 0.5, molSrc_old, 0, 0.5, molSrc_new, 0, 0, NVAR, 0);
+      amrex::MultiFab::LinComb(molSrc, 0.5, molSrc_old, 0, 0.5, molSrc_new, 0, 0, NVAR, 0);
 
+#if DO_CLEM_PARTICLE
+      amrex::Print() << "... CLEM : Computing reactions for dt = " << dt << std::endl;
+      amrex::MultiFab& react_src                                        = get_new_data(Reactions_Type);
+      react_src.setVal(0.0);
+      auto const* ltransparm                                            = trans_parms.device_parm();
+      pele::physics::reactions::ReactorBase* reactor                    = PeleC::reactor.get();
+      clem::ClemParticles& clemContainer                                = getClemParticles();
+      //inflow implementation - pass FillPatched Sborder so inflow particles inherit the bcnormal ghost-cell state
+      ClemContainer->DoClem(ltransparm, reactor, react_src, dt, molSrc, S_old, S_new, Sborder);
+      CellHydroFluxes.setVal(0.0);
+#else
       // Compute I_R and U^{n+1} = U^n + dt*(F_{AD} + I_R)
       react_state(time, dt, false, &molSrc);
-
+#endif
       computeTemp(S_new, 0);
     }
   }
@@ -294,9 +356,10 @@ PeleC::do_sdc_iteration(
       AMREX_ASSERT(
         !do_mol); // Currently this combo only managed through MOL integrator
       amrex::Real reflux_factor_old = 0.5;
-
+#if !DO_CLEM_PARTICLE
       getMOLSrcTerm(
         Sborder, *old_sources[diff_src], time, dt, reflux_factor_old);
+#endif
     }
 
     // Initialize sources at t_new by copying from t_old
@@ -333,7 +396,9 @@ PeleC::do_sdc_iteration(
                      << sub_iteration + 1 << ")" << std::endl;
     }
     amrex::Real reflux_factor_new = sub_iteration == sub_ncycle - 1 ? 0.5 : 0;
+  #if !DO_CLEM_PARTICLE
     getMOLSrcTerm(Sborder, *new_sources[diff_src], time, dt, reflux_factor_new);
+  #endif
   }
 
   // Build other (non-diffusion) sources at t_new

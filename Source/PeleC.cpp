@@ -475,6 +475,20 @@ PeleC::PeleC(
     new_sources[src] = std::make_unique<amrex::MultiFab>(
       grids, dmap, NVAR, newGrow, amrex::MFInfo(), Factory());
   }
+    
+#if DO_CLEM_PARTICLE
+    amrex::Print() << "--------------------------------------------------------" << std::endl;
+    amrex::Print()<< "CLEM PARTICLE USING AND INITIALIZING" << std::endl;
+    amrex::Print() << "--------------------------------------------------------" << std::endl;
+    ClemContainer = std::make_unique<clem::ClemParticles>(geom, dm, grids);
+    ClemContainer->SetPhysBC(phys_bc);
+    ClemContainer->InitParticles();
+    ClemContainer->WritePlotFile("plt_initialization_particles", "particles");
+    amrex::Print() << " ----------- Redistribute ----------- " << std::endl;
+    ClemContainer->Redistribute();
+    amrex::Print() << " ----------- DefineOwnership ----------- " << std::endl;
+    ClemContainer->DefineOwnershipParticleMesh();
+#endif
 
   int nGrowS = numGrow();
 #ifdef PELE_USE_SPRAY
@@ -1196,6 +1210,16 @@ PeleC::post_init(amrex::Real /*stop_time*/)
 
     react_state(cumtime, dtlev, react_init);
   }
+
+ #if DO_CLEM_PARTICLE
+  amrex::Print() << " -----------------------------------------------------------" << std::endl;
+  amrex::Print() << "Initialization of Variables in CLEM - ELements" << std::endl;
+  amrex::Print() << " -----------------------------------------------------------" << std::endl;
+  const amrex::MultiFab& Snew                     = get_new_data(State_Type);
+  //clem::ClemParticles& ClemContainer              = getClemParticles();
+
+  ClemContainer->SetParticlePropertiesFromMF(Snew);
+ #endif 
 
   if (level > 0) {
     return;

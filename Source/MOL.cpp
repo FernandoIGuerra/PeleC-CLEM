@@ -7,6 +7,9 @@ pc_compute_hyp_mol_flux(
   const amrex::Box& cbox,
   const amrex::Array4<const amrex::Real>& q,
   const amrex::Array4<const amrex::Real>& qaux,
+#if DO_CLEM_PARTICLE
+  const amrex::Array4<amrex:: Real>& CellFlux,
+#endif
   const amrex::GpuArray<amrex::Array4<amrex::Real>, AMREX_SPACEDIM>& flx,
   const amrex::GpuArray<const amrex::Array4<const amrex::Real>, AMREX_SPACEDIM>&
     area,
@@ -24,8 +27,7 @@ pc_compute_hyp_mol_flux(
   const auto geomdata = geom.data();
   int axisdir_captured = axisdir;
   amrex::Real omega_captured = omega;
-  amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> axisloc_captured = {
-    AMREX_D_DECL(axis_loc[0], axis_loc[1], axis_loc[2])};
+  amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> axisloc_captured = {AMREX_D_DECL(axis_loc[0], axis_loc[1], axis_loc[2])};
 
   for (int dir = 0; dir < AMREX_SPACEDIM; dir++) {
     amrex::FArrayBox dq_fab(cbox, QVAR, amrex::The_Async_Arena());
@@ -44,55 +46,47 @@ pc_compute_hyp_mol_flux(
       {bdim[0] * UMX + bdim[1] * UMY + bdim[2] * UMZ,
        bdim[0] * UMY + bdim[1] * UMX + bdim[2] * UMX,
        bdim[0] * UMZ + bdim[1] * UMZ + bdim[2] * UMY}};
-
+    //dq is the slope limiter 
+    // delta_lim = { 2*min (delta-, delta+ ) if delta- * delta + > 0 else 0}
+    //alpha limiter is used to recontruct at teh cell face fro all primitive varibles(including y_k)
     if (mol_iorder != 1) {
-      amrex::ParallelFor(
-        cbox, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+      amrex::ParallelFor( cbox, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
           mol_slope(i, j, k, dir, q_idx, q, qaux, dq, flags);
         });
     }
     const amrex::Box tbox = amrex::grow(cbox, dir, -1);
+    //Here the iteration is set in face wise
     const amrex::Box ebox = amrex::surroundingNodes(tbox, dir);
-    amrex::ParallelFor(
-      ebox, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+    amrex::ParallelFor( ebox, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
         const amrex::IntVect iv{AMREX_D_DECL(i, j, k)};
         const amrex::IntVect ivm(iv - amrex::IntVect::TheDimensionVector(dir));
 
+        //Variables extrapoaltion to faces
         amrex::Real qtempl[R_NUM] = {0.0};
-        qtempl[R_UN] =
-          q(ivm, q_idx[0]) + 0.5 * ((dq(ivm, 1) - dq(ivm, 0)) / q(ivm, QRHO));
-        qtempl[R_P] =
-          q(ivm, QPRES) + 0.5 * (dq(ivm, 0) + dq(ivm, 1)) * qaux(ivm, QC);
-        qtempl[R_UT1] = q(ivm, q_idx[1]) + 0.5 * dq(ivm, 2);
-        qtempl[R_UT2] =
-          AMREX_D_PICK(0.0, 0.0, q(ivm, q_idx[2]) + 0.5 * dq(ivm, 3));
-        qtempl[R_RHO] = 0.0;
+        qtempl[R_UN]      = q(ivm, q_idx[0]) + 0.5 * ((dq(ivm, 1) - dq(ivm, 0)) / q(ivm, QRHO));
+        qtempl[R_P]       = q(ivm, QPRES) + 0.5 * (dq(ivm, 0) + dq(ivm, 1)) * qaux(ivm, QC);
+        qtempl[R_UT1]     = q(ivm, q_idx[1]) + 0.5 * dq(ivm, 2);
+        qtempl[R_UT2]     = AMREX_D_PICK(0.0, 0.0, q(ivm, q_idx[2]) + 0.5 * dq(ivm, 3));
+        qtempl[R_RHO]     = 0.0;
         for (int n = 0; n < NUM_SPECIES; n++) {
-          qtempl[R_Y + n] =
-            q(ivm, QFS + n) * q(ivm, QRHO) +
-            0.5 * (dq(ivm, QFS + n) +
-                   q(ivm, QFS + n) * (dq(ivm, 0) + dq(ivm, 1)) / qaux(ivm, QC));
-          qtempl[R_RHO] += qtempl[R_Y + n];
+          qtempl[R_Y + n]   = q(ivm, QFS + n) * q(ivm, QRHO) +
+                              0.5 * (dq(ivm, QFS + n) + q(ivm, QFS + n) * (dq(ivm, 0) + dq(ivm, 1)) / qaux(ivm, QC));
+          qtempl[R_RHO]     += qtempl[R_Y + n];
         }
 
         for (int n = 0; n < NUM_SPECIES; n++) {
-          qtempl[R_Y + n] = qtempl[R_Y + n] / qtempl[R_RHO];
+          qtempl[R_Y + n]   = qtempl[R_Y + n] / qtempl[R_RHO];
         }
 
         amrex::Real qtempr[R_NUM] = {0.0};
-        qtempr[R_UN] =
-          q(iv, q_idx[0]) - 0.5 * ((dq(iv, 1) - dq(iv, 0)) / q(iv, QRHO));
-        qtempr[R_P] =
-          q(iv, QPRES) - 0.5 * (dq(iv, 0) + dq(iv, 1)) * qaux(iv, QC);
+        qtempr[R_UN]  = q(iv, q_idx[0]) - 0.5 * ((dq(iv, 1) - dq(iv, 0)) / q(iv, QRHO));
+        qtempr[R_P]   = q(iv, QPRES) - 0.5 * (dq(iv, 0) + dq(iv, 1)) * qaux(iv, QC);
         qtempr[R_UT1] = q(iv, q_idx[1]) - 0.5 * dq(iv, 2);
-        qtempr[R_UT2] =
-          AMREX_D_PICK(0.0, 0.0, q(iv, q_idx[2]) - 0.5 * dq(iv, 3));
+        qtempr[R_UT2] = AMREX_D_PICK(0.0, 0.0, q(iv, q_idx[2]) - 0.5 * dq(iv, 3));
         qtempr[R_RHO] = 0.0;
         for (int n = 0; n < NUM_SPECIES; n++) {
-          qtempr[R_Y + n] =
-            q(iv, QFS + n) * q(iv, QRHO) -
-            0.5 * (dq(iv, QFS + n) +
-                   q(iv, QFS + n) * (dq(iv, 0) + dq(iv, 1)) / qaux(iv, QC));
+          qtempr[R_Y + n] = q(iv, QFS + n) * q(iv, QRHO) -
+                            0.5 * (dq(iv, QFS + n) + q(iv, QFS + n) * (dq(iv, 0) + dq(iv, 1)) / qaux(iv, QC));
           qtempr[R_RHO] += qtempr[R_Y + n];
         }
         for (int n = 0; n < NUM_SPECIES; n++) {
@@ -180,6 +174,45 @@ pc_compute_hyp_mol_flux(
 #endif
         }
         flux_tmp[UTEMP] = 0.0;
+        // n = 0, 1, 2, 3, 4, 5  Left, Right, Bottom, Top
+         //The order of the stored fluxes is as follows
+        //          3
+        /*        _ _ _
+            0    |     |1
+                 |_ _ _|
+        */          //2
+        // If DIM == 3 then same order in the 
+        //if(std::abs(flux_tmp[URHO]) > 0.0){
+          //amrex::Print() << "area: " << area[dir](i, j, k) << " flux: " << flux_tmp[URHO] << " at iv: " << iv << " dir: " << dir << std::endl;
+        //}
+
+        //Flux storage::
+        //left :0
+        //right:1
+        //bottom:2
+        //top:3
+        //front:4
+        //back:5
+
+        //flux_tmp is the fluy at the face between iv{i,j,k} andiv_n{i-1, j, k} in x direction
+        if(dir == 0){
+          amrex::IntVect iv_n = iv - amrex::IntVect{AMREX_D_DECL(1, 0, 0)};
+          CellFlux(iv, 0)      += flux_tmp[URHO]* area[dir](i, j, k); //Left x face : flux comming to the cell iv
+          CellFlux(iv_n, 1)    -= flux_tmp[URHO]* area[dir](i, j, k); //Right x face:
+
+        }else if (dir == 1)
+        {//flux_tmp is the fluy at the face between iv{i,j,k} andiv_n{i, j-1, k} in x direction
+          amrex::IntVect iv_n = iv - amrex::IntVect{AMREX_D_DECL(0, 1, 0)};
+          CellFlux(iv, 2)      += flux_tmp[URHO]* area[dir](i, j, k);
+          CellFlux(iv_n, 3)    -= flux_tmp[URHO]* area[dir](i, j, k);
+
+        }else if(dir == 2){
+          amrex::IntVect iv_n = iv - amrex::IntVect{AMREX_D_DECL(0, 0, 1)};
+          CellFlux(iv, 4)     += flux_tmp[URHO]* area[dir](i, j, k);
+          CellFlux(iv_n, 5)   -= flux_tmp[URHO]* area[dir](i, j, k);
+        }
+        //fix this beause iv is IntVect and depending on the dire we need to substract 1 to the correct direction
+      
         for (int ivar = 0; ivar < NVAR; ivar++) {
           flx[dir](iv, ivar) += flux_tmp[ivar] * area[dir](i, j, k);
         }

@@ -1,0 +1,153 @@
+    ClemParticles::ParticleType ClemParticles::CreateParticleTypeDefault(  int index_lem, 
+                                                            amrex::IntVect iv, 
+                                                            const amrex::Real* plo, 
+                                                            const amrex::Real* dx, 
+                                                            amrex::Real dx_inner)
+    {
+        ParticleType p;
+        p.id()      = ParticleType::NextID();
+        p.cpu()     = amrex::ParallelDescriptor::MyProc();
+
+        p.pos(0)    = plo[0] + iv[0]*dx[0] + (index_lem+1)*dx_inner;
+        p.pos(1)    = plo[1] + (iv[1] + 0.5)*dx[1];
+#if (AMREX_SPACEDIM == 3)
+        p.pos(2)    = plo[2] + (iv[2] + 0.5)*dx[2];
+#endif
+
+        p.idata(IntData::idx)      = index_lem;
+        p.idata(IntData::i)        = iv[0];
+        p.idata(IntData::j)        = iv[1];
+#if (AMREX_SPACEDIM == 3)
+        p.idata(IntData::k)        = iv[2];
+#endif              
+
+        p.idata(IntData::advected) = 0;
+
+        //Definition of Real component 
+        p.rdata(RealData::mass)     = 0.0;
+        p.rdata(RealData::pressure) = 0.0;
+        p.rdata(RealData::volume)   = 0.0;
+        p.rdata(RealData::flux)     = 0.0;
+
+        p.rdata(RealData::density)  = 0.0;
+        p.rdata(RealData::energy)   = 0.0;
+        p.rdata(RealData::temp)     = 0.0;
+
+        //Initialization of SP values
+        for(unsigned int sp = 0; sp < NUM_SPECIES ; sp++){
+            p.rdata(RealData::SP(sp)) = 0.0;
+        }
+        return p;
+    }
+
+
+    
+    ClemParticles::ParticleType ClemParticles::CreateParticleAdvectionTypeDefault( 
+                                                            amrex::IntVect iv, 
+                                                            const amrex::Real* plo, 
+                                                            const amrex::Real* dx,
+                                                            const amrex::Real flux_out,
+                                                            const ParticleType& p_in)
+    {
+        ParticleType p;
+        p.id()      = ParticleType::NextID();
+        p.cpu()     = amrex::ParallelDescriptor::MyProc();
+
+        p.pos(0)    = plo[0] + (iv[0] + 0.5)*dx[0];
+        p.pos(1)    = plo[1] + (iv[1] + 0.5)*dx[1];
+#if (AMREX_SPACEDIM == 3)
+        p.pos(2)    = plo[2] + (iv[2] + 0.5)*dx[2];
+#endif
+
+        p.idata(IntData::idx)      = 100; //Default value for the index of the lem, this is not important since will be updated later
+        p.idata(IntData::i)        = iv[0];
+        p.idata(IntData::j)        = iv[1];
+#if (AMREX_SPACEDIM == 3)
+        p.idata(IntData::k)        = iv[2];
+#endif              
+
+        p.idata(IntData::advected) = 1;
+
+        //Definition of Real component 
+        p.rdata(RealData::mass)     = flux_out;
+        p.rdata(RealData::pressure) = p_in.rdata(RealData::pressure);
+        p.rdata(RealData::flux)     = std::abs(flux_out);
+
+        p.rdata(RealData::density)  = p_in.rdata(RealData::density);
+        p.rdata(RealData::energy)   = p_in.rdata(RealData::energy);
+        p.rdata(RealData::temp)     = p_in.rdata(RealData::temp);
+
+        //to preserve the density of the particle we set the volume based on the mass and density
+        p.rdata(RealData::volume)   = p.rdata(RealData::mass) / p.rdata(RealData::density);
+        //Initialization of SP values
+        for(unsigned int sp = 0; sp < NUM_SPECIES ; sp++){
+            p.rdata(RealData::SP(sp)) = p_in.rdata(RealData::SP(sp));
+        }
+        return p;
+    }
+    
+    /**
+    @brief Particles are advected in the domain. The advection is mainly by shifting the position of a particle in the domain
+            After the advection is required to call "DefineOwnershipPArticleMesh" and then "UpdateIndexAfterAdvection"
+            The first indicates which particles have to be manipulated by a rank and the second order the incommming particles
+    */
+
+
+        void
+    ClemParticles::MoveParticles(){
+        const int lev = 0;
+        const amrex::Geometry& geom     = Geom(lev);
+        const amrex::Real* plo          = geom.ProbLo();
+        const amrex::Real* dx           = geom.CellSize();
+        const amrex::Box& domain        = Geom(lev).Domain();
+
+        AMREX_ASSERT(m_cell_vector_updated);
+
+
+        for(MyPartIter pti(*this, lev); pti.isValid(); ++pti){
+            const int grid_id           = pti.index();
+            const int tile_id           = pti.LocalTileIndex();
+            auto& cell_fab              = m_cell_vectors[grid_id]; //Here the particles idex are stores
+            const amrex::Box& bx        = pti.validbox();
+            auto& particle_tile         = GetParticles(lev)[std::make_pair(grid_id, tile_id)];
+            auto& particles             = particle_tile.GetArrayOfStructs();
+
+            for(amrex::IntVect iv = bx.smallEnd(); iv <= bx.bigEnd();  bx.next(iv)){
+                //Getting all the particles within a cell
+                auto& plist = cell_fab(iv);
+                //Sort them by index number
+                std::sort(plist.begin(), plist.end(),[&](int a, int b) {return particles[a].idata(IntData::idx)< particles[b].idata(IntData::idx);});
+
+                //Advection in x
+                {
+                    ParticleType& p     = particles[plist[0]];
+                    //a periodic boudnary condition is set
+                    amrex::IntVect dst  = boundaryCondition::wrap_iv(iv + amrex::IntVect(AMREX_D_DECL(1,0,0)), domain);
+
+                    p.idata(IntData::i) = dst[0];
+                    p.idata(IntData::j) = dst[1];
+#if (AMREX_SPACEDIM==3)
+                    p.idata(IntData::k) = dst[2];
+#endif              
+                    //Flags to ordet in suring the regridding
+                    p.rdata(RealData::flux) = 1.0;
+                    p.idata(IntData::advected)  = 1;
+
+                    amrex::Real x           = plo[0] + (dst[0] + 0.5)*dx[0];
+                    amrex::Real y           = plo[1] + (dst[1] + 0.5)*dx[1];
+
+                    p.pos(0) = x;
+                    p.pos(1) = y;
+
+#if (AMREX_SPACEDIM == 3)
+                    amrex::Real z = plo[2] + (dst[2] + 0.5)*dx[2];
+                    p.pos(2) = z;
+#endif              
+
+                }
+            }
+        }
+
+        // === PHASE 3: rebuild ownership & renumber idx ===
+        m_cell_vector_updated = false;
+    }

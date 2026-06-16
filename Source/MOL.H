@@ -116,6 +116,9 @@ void pc_compute_hyp_mol_flux(
   const amrex::Box& cbox,
   const amrex::Array4<const amrex::Real>& q,
   const amrex::Array4<const amrex::Real>& qaux,
+#if DO_CLEM_PARTICLE
+  const amrex::Array4<amrex:: Real>& CellFlux,
+#endif
   const amrex::GpuArray<amrex::Array4<amrex::Real>, AMREX_SPACEDIM>& flx,
   const amrex::GpuArray<const amrex::Array4<const amrex::Real>, AMREX_SPACEDIM>&
     area,

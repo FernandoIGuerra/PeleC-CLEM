@@ -1,5 +1,5 @@
 # AMReX
-DIM = 3
+DIM = 2
 COMP = gnu
 PRECISION = DOUBLE
 
@@ -11,8 +11,10 @@ TRACE_PROFILE = FALSE
 MEM_PROFILE = FALSE
 USE_GPROF = FALSE
 
+DO_CLEM_PARTICLE = TRUE
+
 # Performance
-USE_MPI = FALSE
+USE_MPI = TRUE
 USE_OMP = FALSE
 USE_CUDA = FALSE
 USE_HIP = FALSE
@@ -27,9 +29,9 @@ THREAD_SANITIZER = FALSE
 PELE_CVODE_FORCE_YCORDER = FALSE
 PELE_USE_MAGMA = FALSE
 PELE_COMPILE_AJACOBIAN = FALSE
-Eos_Model := GammaLaw
-Transport_Model := Constant
-Chemistry_Model := Null
+Eos_Model := Fuego
+Chemistry_Model := LiDryer
+Transport_Model := Simple
 
 # GNU Make
 Bpack := ./Make.package

@@ -28,6 +28,12 @@ CEXE_sources += Geometry.cpp
 CEXE_sources += InitEB.cpp
 CEXE_sources += RotSource.cpp
 
+CEXE_sources += ClemParticles/clem_particle.cpp
+CEXE_sources += ClemParticles/clem_functionalities.cpp
+CEXE_sources += ClemParticles/particle_functionalities.cpp
+CEXE_sources += ClemParticles/clem_diffusion.cpp
+CEXE_cources += ClemParticle/clem_regridding_utils.cpp
+
 #C++ headers
 CEXE_headers += PeleC.H
 CEXE_headers += PeleCAmr.H
@@ -53,6 +59,15 @@ CEXE_headers += EBStencilTypes.H
 CEXE_headers += EB.H
 CEXE_headers += Geometry.H
 CEXE_headers += SparseData.H
+
+CEXE_headers += ClemParticles/clem_particle.H
+CEXE_headers += ClemParticles/clem_functionalities.H
+CEXE_headers += ClemParticles/clem_advection.H
+CEXE_headers += ClemParticles/clem_index_definition.H
+CEXE_headers += ClemParticles/int_real_data.H
+CEXE_headers += ClemParticles/particle_functionalities.H
+CEXE_headers += ClemParticles/clem_diffusion.H
+CEXE_headers += ClemPArticles/clem_regridding_utils.H
 
 ifeq ($(USE_PARTICLES), TRUE)
   CEXE_sources += Particle.cpp

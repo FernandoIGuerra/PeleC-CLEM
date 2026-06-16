@@ -40,43 +40,37 @@ amrex_probinit(
 
   // Load x profiles from file
   if (
-    (PeleC::h_prob_parm_device->case_type_int == 1) ||
-    (PeleC::h_prob_parm_device->case_type_int == 2)) {
-    amrex::Vector<double> data(
-      PeleC::h_prob_parm_device->nx *
-      PeleC::h_prob_parm_device->nvars); /* this needs to be double */
-    read_csv(
-      PeleC::prob_parm_host->iname, PeleC::h_prob_parm_device->nx, 1, 1, data);
+    (PeleC::h_prob_parm_device->case_type_int == 1) || (PeleC::h_prob_parm_device->case_type_int == 2)) {
+    amrex::Vector<double> data(PeleC::h_prob_parm_device->nx * PeleC::h_prob_parm_device->nvars); /* this needs to be double */
+    read_csv(PeleC::prob_parm_host->iname, PeleC::h_prob_parm_device->nx, 1, 1, data);
 
-    PeleC::prob_parm_host->h_input.resize(
-      PeleC::h_prob_parm_device->nx * PeleC::h_prob_parm_device->nvars);
+    PeleC::prob_parm_host->h_input.resize(PeleC::h_prob_parm_device->nx * PeleC::h_prob_parm_device->nvars);
     PeleC::prob_parm_host->h_dxinput.resize(PeleC::h_prob_parm_device->nx);
     PeleC::prob_parm_host->h_xarray.resize(PeleC::h_prob_parm_device->nx);
+
     for (int i = 0; i < PeleC::prob_parm_host->h_input.size(); i++) {
       PeleC::prob_parm_host->h_input[i] = data[i];
     }
+
     const amrex::Real m2cm = 100.0;
+
     for (int i = 0; i < PeleC::h_prob_parm_device->nx; i++) {
-      PeleC::prob_parm_host->h_input
-        [PeleC::h_prob_parm_device->input_x +
-         i * PeleC::h_prob_parm_device->nvars] *= m2cm;
-      PeleC::prob_parm_host->h_xarray[i] =
-        PeleC::prob_parm_host->h_input
-          [PeleC::h_prob_parm_device->input_x +
-           i * PeleC::h_prob_parm_device->nvars];
+      PeleC::prob_parm_host->h_input[PeleC::h_prob_parm_device->input_x + i * PeleC::h_prob_parm_device->nvars] *= m2cm;
+      PeleC::prob_parm_host->h_xarray[i] = PeleC::prob_parm_host->h_input[PeleC::h_prob_parm_device->input_x + i * PeleC::h_prob_parm_device->nvars];
     }
+
     std::adjacent_difference(
-      PeleC::prob_parm_host->h_xarray.begin(),
-      PeleC::prob_parm_host->h_xarray.end(),
-      PeleC::prob_parm_host->h_dxinput.begin());
+                            PeleC::prob_parm_host->h_xarray.begin(),
+                            PeleC::prob_parm_host->h_xarray.end(),
+                            PeleC::prob_parm_host->h_dxinput.begin());
+
     PeleC::prob_parm_host->h_dxinput[0] = PeleC::prob_parm_host->h_dxinput[1];
 
     // Get pointer to the data
     PeleC::prob_parm_host->input.resize(PeleC::prob_parm_host->h_input.size());
-    PeleC::prob_parm_host->xarray.resize(
-      PeleC::prob_parm_host->h_xarray.size());
-    PeleC::prob_parm_host->dxinput.resize(
-      PeleC::prob_parm_host->h_dxinput.size());
+    PeleC::prob_parm_host->xarray.resize( PeleC::prob_parm_host->h_xarray.size());
+    PeleC::prob_parm_host->dxinput.resize(PeleC::prob_parm_host->h_dxinput.size());
+    
     amrex::Gpu::copy(
       amrex::Gpu::hostToDevice, PeleC::prob_parm_host->h_input.begin(),
       PeleC::prob_parm_host->h_input.end(),

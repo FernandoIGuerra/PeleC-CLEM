@@ -16,6 +16,7 @@ endif
 
 USE_EB = TRUE
 USE_SUNDIALS = TRUE
+AMREX_PARTICLES = TRUE
 
 include $(AMREX_HOME)/Tools/GNUMake/Make.defs
 
@@ -124,7 +125,12 @@ Blocs             += $(TRANSPORT_HOME)
 
 Bdirs := $(PELE_HOME)/Source $(PELE_HOME)/Source/Params/param_includes
 
-Pdirs := Base Amr Boundary AmrCore EB
+Pdirs := Base Amr Boundary AmrCore EB 
+
+#Clem
+ifeq ($(DO_CLEM_PARTICLE), TRUE)
+  Pdirs += Particle
+endif
 
 # Spray
 ifeq ($(USE_PARTICLES), TRUE)
