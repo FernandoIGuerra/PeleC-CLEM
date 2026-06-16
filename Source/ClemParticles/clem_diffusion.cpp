@@ -177,8 +177,16 @@ static void ComputeSpeciesSource(
     }
 }
 
-// r_max: scheme-dependent CFL coefficient.
-// Stability condition for mass-coordinate stencil: dt <= r_max * dm² / (ρ · transport · A²)
+// Thermal and species transport have different physical units so their CFL limits
+// cannot be compared via a single max.  Each is computed independently and the
+// minimum (most restrictive) timestep is returned.
+//
+//   Thermal (energy):  De/Dt ~ density * lambda * d²T/dm²
+//                      dt_T  = r_max * dm² / max_i(density[i] * lam[i] * A²)
+//
+//   Species:           DY/Dt ~ density * (rho*D) * d²Y/dm²
+//                      dt_Y  = r_max * dm² / max_{i,sp}(density[i] * (rhoD)[i][sp] * A²)
+//
 // O2 schemes: r_max = 0.5; O4 scheme: r_max = 3/11.
 static amrex::Real ComputeStableTimestep(
     const diffusion::LemReal&   density,
@@ -187,15 +195,24 @@ static amrex::Real ComputeStableTimestep(
     amrex::Real areaFactor,
     amrex::Real r_max = 0.5)
 {
-    const amrex::Real A2 = areaFactor * areaFactor;
-    amrex::Real beta = 0.0;
-    for (int i = 0; i < NUM_LEM; i++) {
-        amrex::Real alpha_max = transport[i][CLEM_dComp_lambda];
+    const amrex::Real A2   = areaFactor * areaFactor;
+    const amrex::Real dm2  = dm * dm;
+
+    // Thermal: max over particles of density * lambda
+    amrex::Real beta_T = 0.0;
+    for (int i = 0; i < NUM_LEM; i++)
+        beta_T = std::max(beta_T, density[i] * transport[i][CLEM_dComp_lambda] * A2);
+
+    // Species: max over particles and species of density * (rho*D)
+    amrex::Real beta_Y = 0.0;
+    for (int i = 0; i < NUM_LEM; i++)
         for (int sp = 0; sp < NUM_SPECIES; sp++)
-            alpha_max = std::max(alpha_max, transport[i][sp]);
-        beta = std::max(beta, density[i] * alpha_max * A2);
-    }
-    return (beta > 0.0) ? (r_max * dm * dm) / beta : std::numeric_limits<amrex::Real>::max();
+            beta_Y = std::max(beta_Y, density[i] * transport[i][sp] * A2);
+
+    amrex::Real dt = std::numeric_limits<amrex::Real>::max();
+    if (beta_T > 0.0) dt = std::min(dt, r_max * dm2 / beta_T);
+    if (beta_Y > 0.0) dt = std::min(dt, r_max * dm2 / beta_Y);
+    return dt;
 }
 
 // -----------------------------------------------------------------------
@@ -441,11 +458,8 @@ void diffusion::CalculationOfTransport(
         amrex::Real mu, xi, lam;
         trans.transport(false, false, true, true, false, T, rho, Y, Ddiag, chi, mu, xi, lam, ltransparm);
 
-        amrex::Real cp;
-        eos.TY2Cp(T, Y, cp);
-
         for (int sp = 0; sp < NUM_SPECIES; sp++) transport[lem][sp] = Ddiag[sp];
-        transport[lem][NUM_SPECIES] = lam / cp;   // rho*alpha_T = lambda/Cp
+        transport[lem][NUM_SPECIES] = lam;   // thermal conductivity lambda — De/Dt stencil uses harmean(rho*lam)
     }
 }
 
