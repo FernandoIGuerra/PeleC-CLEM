@@ -1,0 +1,126 @@
+Initializing AMReX (25.08-25-g85c37a562d5e)...
+MPI initialized with 4 MPI processes
+MPI initialized with thread support level 0
+Initializing SUNDIALS with 1 threads...
+SUNDIALS initialized.
+AMReX (25.08-25-g85c37a562d5e) initialized
+
+Starting run at 16:47:34 UTC on 2026-07-06.
+Successfully read inputs file ... 
+
+PeleC git hash: v25.04-30-g3fb31e6-dirty
+AMReX git hash: 25.08-25-g85c37a56
+PelePhysics git hash: v25.04-41-gbc7e524
+AMReX-Hydro git hash: v7.1.1-58-g0eff3966
+
+0 Advected Variables: 
+
+9 Species: 
+H2  O2  H2O  H  O  OH  HO2  H2O2  N2  
+0 Auxiliary Variables: 
+
+Initializing EB2
+Successfully read inputs file ... 
+Starting to call amrex_probinit ... 
+13 variables found in PMF file
+921 data lines found in PMF file
+CLEM1DFlame: reference front at x_ref = 3.01108098 cm, placed at x_flame = 0.35 cm (standoff = -2.66108098)
+Successfully run amrex_probinit
+--------------------------------------------------------
+CLEM PARTICLE USING AND INITIALIZING
+--------------------------------------------------------
+ ----------- Redistribute ----------- 
+ ----------- DefineOwnership ----------- 
+Creating ReactorBase instance: ReactorCvode
+Initializing CVODE:
+Initializing the data at level 0
+Done initializing level 0 data 
+...estimated hydro-limited timestep at level 0: 1.033560001e-08
+PeleC::estTimeStep (hydro-limited) at level 0:  estdt = 1.033560001e-08
+... Initializing reactions, using interval dt = 3.100680002e-09
+ -----------------------------------------------------------
+Initialization of Variables in CLEM - ELements
+ -----------------------------------------------------------
+
+TIME = 0 MASS        = 5.620876163e-06
+TIME = 0 XMOM        = 0.000233056125
+TIME = 0 YMOM        = 0
+TIME = 0 ZMOM        = 0
+TIME = 0 RHO*e       = -10394.92917
+TIME = 0 RHO*K       = 0.00771079467
+TIME = 0 RHO*E       = -10394.92146
+TIME = 0 FUEL PROD   = 0
+
+TIME = 0 density     MIN = 0.00023009875    MAX = 0.0010296837   
+TIME = 0 x_velocity  MIN = 22.633758        MAX = 101.28526      
+TIME = 0 y_velocity  MIN = 0                MAX = 0              
+TIME = 0 z_velocity  MIN = 0                MAX = 0              
+TIME = 0 eint_e      MIN = -4.4731155e+09   MAX = -9.7056138e+08 
+TIME = 0 Temp        MIN = 298              MAX = 1425.9569      
+TIME = 0 pressure    MIN = 1013250          MAX = 1013250        
+TIME = 0 massfrac    MIN = -3.1918329e-13   MAX = 0.75974213     
+TIME = 0 sumYminus1  MIN = -2.220446e-16    MAX = 2.220446e-16   
+TIME = 0 HO2         MIN = -1.028497e-13    MAX = 0.00023231835  
+INITIAL GRIDS 
+  Level 0   4 grids  1024 cells  100 % of domain
+            smallest grid: 64 x 4  biggest grid: 64 x 4
+
+PLOTFILE: file = CurrentResults/pltFlameCorrection_00000
+Write plotfile time = 0.003749234  seconds
+
+...estimated hydro-limited timestep at level 0: 1.033560001e-08
+PeleC::estTimeStep (hydro-limited) at level 0:  estdt = 1.033560001e-08
+[Level 0 step 1] ADVANCE at time 0 with dt = 3.100680002e-09
+... Computing MOL source term at t^{n} 
+... Computing MOL source term at t^{n+1} 
+ ###############################################################################
+.....  CLEM : Computing reactions for dt = 3.100680002e-09
+.....  CLEM: Diffusion,Reaction, and Calcualtion of omega filtered
+..... CLEM diffusion: max sub-iterations (all ranks) = 1
+Computation of Amount of mass species
+Omega Filteres
+Particle Advection
+Preparation for update
+Finished
+ ###############################################################################
+[Level 0 step 1] Advanced 1024 cells
+
+[STEP 1] Coarse TimeStep time: 0.01403302
+[STEP 1] FAB kilobyte spread across MPI nodes: [916 ... 916]
+
+STEP = 1 TIME = 3.100680002e-09 DT = 3.100680002e-09
+
+...estimated hydro-limited timestep at level 0: 1e+200
+PeleC::estTimeStep (pelec.max_dt-limited) at level 0:  estdt = 1e+200
+PeleC::compute_new_dt : limiting dt at level 0
+ ... new dt computed: 1e+200
+ ... but limiting to: 3.410748002e-09 = 1.1 * 3.100680002e-09
+[Level 0 step 2] ADVANCE at time 3.100680002e-09 with dt = 3.410748002e-09
+... Computing MOL source term at t^{n} 
+... Computing MOL source term at t^{n+1} 
+ ###############################################################################
+.....  CLEM : Computing reactions for dt = 3.410748002e-09
+.....  CLEM: Diffusion,Reaction, and Calcualtion of omega filtered
+..... CLEM diffusion: max sub-iterations (all ranks) = 1
+Computation of Amount of mass species
+Omega Filteres
+Particle Advection
+Preparation for update
+Finished
+ ###############################################################################
+[Level 0 step 2] Advanced 1024 cells
+
+[STEP 2] Coarse TimeStep time: 0.026705393
+[STEP 2] FAB kilobyte spread across MPI nodes: [916 ... 916]
+
+STEP = 2 TIME = 6.511428004e-09 DT = 3.410748002e-09
+
+ Signalling a stop because NaNs detected in the Solution
+PLOTFILE: file = CurrentResults/pltFlameCorrection_00002
+Write plotfile time = 0.004216661  seconds
+
+
+Ending run at 16:47:34 UTC on 2026-07-06.
+ Signalling a stop because NaNs detected in the Solution
+Run time = 0.080662851
+Run time w/o init = 0.047383089
