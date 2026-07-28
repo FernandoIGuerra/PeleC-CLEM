@@ -64,6 +64,13 @@ class SootModel;
 #ifdef PELE_USE_SPRAY
 class SprayParticleContainer;
 #endif
+#ifdef CLEM_MODEL
+// Fernando-Clem: forward declaration; the full header is only needed in the
+// implementation files
+namespace clem {
+class ClemManager;
+}
+#endif
 
 AMREX_FORCE_INLINE static bool
 ebInDomain()
@@ -200,6 +207,23 @@ public:
   static std::unique_ptr<SprayParticleContainer> SprayPC;
   static std::unique_ptr<SprayParticleContainer> VirtPC;
   static std::unique_ptr<SprayParticleContainer> GhostPC;
+#endif
+
+#ifdef CLEM_MODEL
+  // Fernando-Clem: read clem.* inputs
+  static void readClemParams();
+
+  // Fernando-Clem: create the manager, seed n_lem elements per cell and copy
+  // the t=0 LES cell state onto every element (called at the end of initData)
+  void initClem();
+
+  // Fernando-Clem: per-step subgrid transport - averages the accumulated MOL
+  // face mass fluxes, splices the LEM elements between cells and regrids back
+  // to n_lem equal-mass elements (called at the end of do_mol_advance)
+  void clemAdvance(amrex::Real time, amrex::Real dt);
+
+  // Fernando-Clem: single manager instance owning the container + cell map
+  static std::unique_ptr<clem::ClemManager> ClemM;
 #endif
 
   // Get problem metrics.
@@ -517,12 +541,16 @@ public:
 
   void computeTemp(amrex::MultiFab& State, int ng);
 
+  // Fernando-Clem: clem_flux (optional) accumulates the extensive face mass
+  // fluxes per cell (2*AMREX_SPACEDIM comps, signed incoming) for the CLEM
+  // splicing; nullptr means no capture
   void getMOLSrcTerm(
     const amrex::MultiFab& S,
     amrex::MultiFab& MOLSrcTerm,
     amrex::Real time,
     amrex::Real dt,
-    amrex::Real flux_factor);
+    amrex::Real flux_factor,
+    amrex::MultiFab* clem_flux = nullptr);
 
   void enforce_consistent_e(amrex::MultiFab& S);
 

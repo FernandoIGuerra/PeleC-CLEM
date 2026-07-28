@@ -1,0 +1,132 @@
+# ============================================================
+#  CLEMTest2D -- 2D jet-in-crossflow reactor
+#  ============================================================
+#  A cold H2 jet (v_jet, +y) is injected through a slot in the y-lo wall
+#  into a hot air crossflow (u_cross, +x). This is a genuinely 2D CLEM case
+#  (unlike CLEM1DFlame/CLEM1DMach, which use a periodic-y "effectively 1D"
+#  domain): downstream of the slot the jet plume bends over into the
+#  crossflow, mixes across a shear layer, and (given enough residence time)
+#  ignites. It exists to gather 2D mixing/ignition STATISTICS (T/species
+#  distributions vs downstream station, jet trajectory, subgrid PDFs) with
+#  the current CLEM machinery.
+#
+#  IMPORTANT CAVEAT (see memory clem-transport-validation.md): CLEM's
+#  subgrid line is 1-D along x with NO transverse structure. Grid-aligned/
+#  translational transport is clean; transverse (y) bulk motion is known to
+#  degrade it (Zalesak rotation test: destroyed by ~1 revolution, heavy
+#  horizontal streaking). The jet here has a large v-velocity by design, so
+#  this case is EXPECTED to exercise/expose that limitation in the jet
+#  plume region - that is the point of the test, not a bug to chase.
+#
+#  CLEM strategy = current best-known reacting config (2026-07-27,
+#  validated in CLEM1DFlame/inputs-CLEM-REACT.inp, stable / no blow-up):
+#    clem.freeze_species     = 1   LES does NOT advect rho*Y_k; CLEM's
+#                                  splicing + subgrid own species transport
+#    clem.pressure_coupling  = 1   LES->SGS isentropic pressure work
+#    clem.couple_back        = 1   SGS->LES conserved-delta + projection
+#    clem.couple_back_energy = 1   conserved rho*e delta (mode 1)
+#    clem.vol_renorm         = 1   ensemble-volume renorm after splice
+#    clem.do_diffusion       = 1   subgrid line diffusion (species+T)
+#    clem.do_react            = 1  subgrid chemistry (co-stepped w/ diffusion)
+#  LES: pelec.do_react=0 (Advance.cpp routes reaction to CLEM when active
+#  regardless of this flag; kept =0 to avoid double-reacting), full LES
+#  diffusion ON (temp/enth/spec/vel) so the RESOLVED (y-direction) mixing of
+#  the jet plume is captured - the subgrid line only ever resolves x.
+#
+#  Grid-vs-physics scale: PeleC is fully compressible, so the acoustic dt
+#  is far smaller than the crossflow flow-through time (~1e-3 s for this
+#  domain) - max_step below covers only the NEAR-FIELD jet injection /
+#  early shear-layer development, not many flow-throughs. Extend max_step
+#  (or reduce the domain / raise u_cross) for longer-time statistics.
+# ============================================================
+
+# ------------------  TIME / STEP CONTROL  -------------------
+stop_time = 1.0
+max_step  = 3000
+
+# ------------------  GEOMETRY (genuinely 2D)  ---------------
+geometry.is_periodic = 0 0
+geometry.coord_sys   = 0
+geometry.prob_lo     =   0.0     0.0
+geometry.prob_hi     =   1.6     0.8
+amr.n_cell           =   128     64
+
+# ------------------  BOUNDARY CONDITIONS  -------------------
+# x-lo: crossflow Hard inflow.  y-lo: wall with a jet slot cut into it
+# (both routed through bcnormal, see prob.H).  x-hi/y-hi: outflow.
+pelec.lo_bc       =  "Hard"     "Hard"
+pelec.hi_bc       =  "FOExtrap" "FOExtrap"
+
+# ------------------  PHYSICS  --------------------------------
+pelec.do_react        = 0
+pelec.do_mol          = 1
+pelec.do_hydro        = 1
+pelec.diffuse_temp    = 1
+pelec.diffuse_enth    = 1
+pelec.diffuse_spec    = 1
+pelec.diffuse_vel     = 1
+pelec.sdc_iters       = 1
+
+# ------------------  TIME-STEP CONTROL  ----------------------
+pelec.cfl         = 0.25
+pelec.init_shrink = 0.3
+pelec.change_max  = 1.1
+pelec.dt_cutoff   = 5.e-20
+
+# ------------------  DIAGNOSTICS / VERBOSITY  -----------------
+pelec.sum_interval = 10
+pelec.v            = 1
+amr.v              = 1
+
+# ------------------  REFINEMENT  ------------------------------
+amr.max_level       = 0
+amr.blocking_factor = 8
+amr.max_grid_size   = 64
+amr.n_error_buf     = 2 2 2 2
+
+# ------------------  CHECKPOINTS  ------------------------------
+amr.checkpoint_files_output = 0
+amr.check_file              = chk
+amr.check_int               = 5000
+
+# ------------------  PLOTFILES  --------------------------------
+amr.plot_files_output = 1
+amr.plot_file         = RESULTS/plt_
+amr.plot_int          = 100
+amr.derive_plot_vars  = density xmom ymom eden Temp pressure x_velocity y_velocity magvel
+pelec.plot_rhoy       = 0
+pelec.plot_massfrac   = 1
+
+# ------------------  PROBLEM PARAMETERS  ------------------------
+prob.pamb       = 1013250.0
+prob.T_cross    = 1200.0
+prob.u_cross    = 1500.0
+prob.Y_O2_cross = 0.232
+prob.Y_N2_cross = 0.768
+prob.T_jet      = 300.0
+prob.v_jet      = 6000.0
+prob.jet_xc     = 0.3
+prob.jet_width  = 0.1
+
+amrex.signal_handling = 0
+
+# ------------------  CLEM (Fernando-Clem)  ------------------
+clem.verbose            = 1
+clem.freeze_species     = 1
+clem.plot_int           = 100
+clem.pressure_coupling  = 1
+clem.couple_back        = 1
+clem.couple_back_energy = 1
+clem.regrid_int         = 1
+clem.do_react           = 1
+clem.do_diffusion           = 1
+clem.diffusion_cfl          = 0.5
+clem.diffusion_max_substeps = 1000
+clem.vol_renorm          = 1
+
+# Fernando-Clem: clem.do_react=1 lazily constructs a
+# pele::physics::reactions::ReactorCvode on first use (ReactionOperator::
+# reactor(), ClemReaction.cpp) - its init() always reads ParmParse("cvode")
+# regardless of pelec.chem_integrator/pelec.do_react (both off here), so
+# this must be set even though the LES itself is not reacting.
+cvode.solve_type = GMRES

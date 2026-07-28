@@ -19,6 +19,11 @@ using namespace MASA;
 #include "SprayParticles.H"
 #endif
 
+// Fernando-Clem: complete type needed for ClemM.reset() in variableCleanUp
+#ifdef CLEM_MODEL
+#include "ClemManager.H"
+#endif
+
 #ifdef PELE_USE_SOOT
 #include "SootModel.H"
 #endif
@@ -720,6 +725,10 @@ PeleC::variableCleanUp()
   GhostPC.reset();
   VirtPC.reset();
   SprayPC.reset();
+#endif
+// Fernando-Clem: release the manager before AMReX tears down
+#ifdef CLEM_MODEL
+  ClemM.reset();
 #endif
 #ifdef PELE_USE_SOOT
   soot_model.cleanup();

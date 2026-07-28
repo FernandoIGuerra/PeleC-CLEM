@@ -1,0 +1,20 @@
+# Fernando-Clem: CLEM subgrid model sources (built only when CLEM_MODEL is enabled)
+CEXE_headers += ClemIndex.H
+CEXE_headers += ClemParticleContainer.H
+CEXE_headers += ClemManager.H
+CEXE_headers += ClemEosUtil.H
+CEXE_headers += ClemScratch.H
+CEXE_headers += ClemAdvection.H
+CEXE_headers += ClemRegrid.H
+CEXE_headers += ClemSplicing.H
+CEXE_headers += ClemDiffusion.H
+CEXE_headers += ClemAlgorithm.H
+CEXE_headers += ClemLesCoupling.H
+CEXE_headers += ClemReaction.H
+CEXE_sources += ClemManager.cpp
+CEXE_sources += ClemRegrid.cpp
+CEXE_sources += ClemSplicing.cpp
+CEXE_sources += ClemDiffusion.cpp
+CEXE_sources += ClemAlgorithm.cpp
+CEXE_sources += ClemLesCoupling.cpp
+CEXE_sources += ClemReaction.cpp

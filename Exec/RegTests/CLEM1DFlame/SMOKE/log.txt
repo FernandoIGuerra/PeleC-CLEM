@@ -1,0 +1,84 @@
+Initializing AMReX (26.05-2-gff4721186f24)...
+MPI initialized with 4 MPI processes
+MPI initialized with thread support level 0
+Initializing SUNDIALS with 1 threads...
+SUNDIALS initialized.
+AMReX (26.05-2-gff4721186f24) initialized
+
+Starting run at 01:53:29 UTC on 2026-07-28.
+Successfully read inputs file ... 
+
+PeleC git hash: v1.0.0-10-g11fcefa-dirty
+AMReX git hash: 26.05-2-gff472118
+PelePhysics git hash: v1.0.0-20-g9a21bed-dirty
+SUNDIALS git hash: v7.1.1-58-g0eff3966
+
+CLEM: n_lem = 12, real comps = 16, int comps = 2, freeze_species = 1, pressure_coupling = 1, couple_back = 1, do_diffusion = 1, do_react = 1
+0 Advected Variables: 
+
+9 Species: 
+H2  O2  H2O  H  O  OH  HO2  H2O2  N2  
+0 Auxiliary Variables: 
+
+Initializing EB2
+Successfully read inputs file ... 
+Starting to call amrex_probinit ... 
+13 variables found in PMF file
+921 data lines found in PMF file
+CLEM1DFlame: reference front at x_ref = 3.01108098 cm, placed at x_flame = 0.35 cm (standoff = -2.66108098)
+Successfully run amrex_probinit
+Initializing the data at level 0
+CLEM: cell map verification passed on level 0
+CLEM: t=0 mass: LES = 5.620876163e-06, LEM elements = 5.620876163e-06
+CLEM: regrid self-test: mass 5.620876163e-06 -> 5.620876163e-06, energy -10394.92917 -> -10394.92917
+CLEM: cell map verification passed on level 0
+Done initializing level 0 data 
+...estimated hydro-limited timestep at level 0: 1.033560001e-08
+PeleC::estTimeStep (hydro-limited) at level 0:  estdt = 1.033560001e-08
+
+TIME = 0 MASS        = 5.620876163e-06
+TIME = 0 XMOM        = 0.000233056125
+TIME = 0 YMOM        = 0
+TIME = 0 ZMOM        = 0
+TIME = 0 RHO*e       = -10394.92917
+TIME = 0 RHO*K       = 0.00771079467
+TIME = 0 RHO*E       = -10394.92146
+TIME = 0 FUEL PROD   = 0
+
+TIME = 0 density     MIN = 0.00023009875    MAX = 0.0010296837   
+TIME = 0 x_velocity  MIN = 22.633758        MAX = 101.28526      
+TIME = 0 y_velocity  MIN = 0                MAX = 0              
+TIME = 0 z_velocity  MIN = 0                MAX = 0              
+TIME = 0 eint_e      MIN = -4.4731155e+09   MAX = -9.7056138e+08 
+TIME = 0 Temp        MIN = 298              MAX = 1425.9569      
+TIME = 0 pressure    MIN = 1013250          MAX = 1013250        
+TIME = 0 massfrac    MIN = -3.1918329e-13   MAX = 0.75974213     
+TIME = 0 sumYminus1  MIN = -2.220446e-16    MAX = 2.220446e-16   
+TIME = 0 HO2         MIN = -1.028497e-13    MAX = 0.00023231835  
+INITIAL GRIDS 
+  Level 0   4 grids  1024 cells  100 % of domain
+            smallest grid: 64 x 4  biggest grid: 64 x 4
+
+PLOTFILE: file = SMOKE/pltREACT_00000
+Write plotfile time = 0.003863341  seconds
+
+...estimated hydro-limited timestep at level 0: 1.033560001e-08
+PeleC::estTimeStep (hydro-limited) at level 0:  estdt = 1.033560001e-08
+[Level 0 step 1] ADVANCE at time 0 with dt = 3.100680002e-09
+... Computing MOL source term at t^{n} 
+... Computing MOL source term at t^{n+1} 
+amrex::Abort::3::Wrong solve_type. Options are: 'dense_direct', denseAJ_direct', 'sparse_direct', 'custom_direct', 'GMRES', 'precGMRES', 'fixed_point' !!!
+amrex::Abort::0::Wrong solve_type. Options are: 'dense_direct', denseAJ_direct', 'sparse_direct', 'custom_direct', 'GMRES', 'precGMRES', 'fixed_point' !!!
+amrex::Abort::1::Wrong solve_type. Options are: 'dense_direct', denseAJ_direct', 'sparse_direct', 'custom_direct', 'GMRES', 'precGMRES', 'fixed_point' !!!
+amrex::Abort::2::Wrong solve_type. Options are: 'dense_direct', denseAJ_direct', 'sparse_direct', 'custom_direct', 'GMRES', 'precGMRES', 'fixed_point' !!!
+Initializing CVODE:
+--------------------------------------------------------------------------
+MPI_ABORT was invoked on rank 3 in communicator MPI_COMM_WORLD
+with errorcode 6.
+
+NOTE: invoking MPI_ABORT causes Open MPI to kill all MPI processes.
+You may or may not see output from other processes, depending on
+exactly when Open MPI kills them.
+--------------------------------------------------------------------------
+[Fernnado:26854] 3 more processes have sent help message help-mpi-api.txt / mpi-abort
+[Fernnado:26854] Set MCA parameter "orte_base_help_aggregate" to 0 to see all help / error messages

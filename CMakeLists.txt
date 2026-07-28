@@ -14,6 +14,9 @@ include(CTest)
 #General options for all executables in the project
 set(PELE_DIM "3" CACHE STRING "Number of physical dimensions, 2 or 3")
 option(PELE_ENABLE_PARTICLES "Enable particles in AMReX library and enables spray" ON)
+# Fernando-Clem: CLEM subgrid model (needs AMReX particles)
+option(PELE_ENABLE_CLEM "Enable CLEM subgrid model" OFF)
+set(PELE_CLEM_NLEM "0" CACHE STRING "LEM elements per cell (0 = use ClemIndex.H default)")
 option(PELE_ENABLE_CLANG_TIDY "Enable clang-tidy analysis" OFF)
 option(PELE_ENABLE_CPPCHECK "Enable cppcheck analysis" OFF)
 option(PELE_ENABLE_MASA "Enable tests that require MASA" OFF)
@@ -44,6 +47,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(PELE_ENABLE_FCOMPARE_FOR_TESTS OR PELE_ENABLE_PARTICLES)
   set(PELE_ENABLE_FCOMPARE ON)
+endif()
+
+# Fernando-Clem: CLEM requires the AMReX particle library
+if(PELE_ENABLE_CLEM AND (NOT PELE_ENABLE_PARTICLES))
+  message(STATUS "PELE_ENABLE_CLEM=ON forces PELE_ENABLE_PARTICLES=ON")
+  set(PELE_ENABLE_PARTICLES ON)
 endif()
 
 if(PELE_ENABLE_CUDA)

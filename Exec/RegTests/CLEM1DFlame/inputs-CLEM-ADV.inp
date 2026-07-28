@@ -1,0 +1,121 @@
+# ============================================================
+#  CLEM 1D premixed flame -- CANONICAL CASE 1: PURE ADVECTION
+#  ============================================================
+#  THIS IS THE INPUT FILE USED FOR THE "advection-only" ANALYSIS.
+#  Pairs with the pristine (unmodified PeleC) reference:
+#    /home/fernando/FPCE/PeleC/Exec/RegTests/1DFlame/inputs-REF-ADV.inp
+#  which must be run with IDENTICAL physics (do_react=0, all
+#  pelec.diffuse_* = 0) and produces ANALYSIS/pltADV_XXXXX there.
+#
+#  Physics: pure Euler transport of the frozen flame profile - no
+#  reaction, no molecular diffusion/viscosity. Isolates the CLEM
+#  coupling (splice + write-back) from any diffusion/reaction error.
+#
+#  CLEM strategy = CURRENT BEST-KNOWN CONFIG (2026-07-27), Maxwell
+#  "subgrid owns species" (freeze_species=1) with the conserved-delta
+#  + projection write-back and ensemble-volume renormalization:
+#    clem.freeze_species     = 1   Maxwell: LES does NOT advect rho*Y_k
+#    clem.pressure_coupling  = 1   LES->SGS isentropic pressure work
+#    clem.couple_back        = 1   SGS->LES conserved-delta + projection
+#                                  (species realizability sum_k rhoY_k=rho
+#                                   enforced to machine precision)
+#    clem.couple_back_energy = 1   ALSO feed back the conserved rho*e
+#                                  delta (mode 1) - validated: bounded,
+#                                  ~11% smaller velocity error than off;
+#                                  mode 2 "keep-T" REJECTED (pumps/grows)
+#    clem.vol_renorm         = 1   isentropic rescale of the line back to
+#                                  V_cell after splice (removes the
+#                                  isobaric p dV bookkeeping error the
+#                                  fixed-volume LES cell never sees;
+#                                  vol defect -> 6.7e-16/step). Its energy
+#                                  change is what couple_back_energy=1
+#                                  above feeds back.
+#    clem.do_diffusion       = 0   no subgrid diffusion needed here (no
+#                                  LES diffusion to match in this case)
+#  Known result (2026-07-26/27): velocity error localizes at the flame
+#  front, magnitude set by the ~1e-4 splice(1st-order)-vs-Godunov(2nd-
+#  order) composition transport gap (Maxwell's known splicing-diffusion
+#  limitation). See memory: clem-velocity-bulge-diagnosis.md,
+#  clem-diffusion-coupling.md.
+# ============================================================
+
+# ------------------  TIME / STEP CONTROL  -------------------
+stop_time = 1.0
+max_step  = 1000
+
+# ------------------  GEOMETRY (quasi-1D)  -------------------
+geometry.is_periodic = 0 1            # transverse periodic -> effectively 1D
+geometry.coord_sys   = 0
+geometry.prob_lo     =   0.0     0.0
+geometry.prob_hi     =   0.8     0.0125
+amr.n_cell           =   256     4
+
+# ------------------  BOUNDARY CONDITIONS  -------------------
+# Hard = inflow (Dirichlet via bcnormal), FOExtrap = outflow
+pelec.lo_bc       =  "Hard"     "Interior"
+pelec.hi_bc       =  "FOExtrap" "Interior"
+
+# ------------------  PHYSICS: pure Euler  ------------------
+pelec.do_react        = 0
+pelec.do_mol          = 1
+pelec.do_hydro        = 1
+pelec.diffuse_temp    = 0
+pelec.diffuse_enth    = 0
+pelec.diffuse_spec    = 0
+pelec.diffuse_vel     = 0
+pelec.sdc_iters       = 1
+pelec.flame_trac_name = HO2
+
+# ------------------  TIME-STEP CONTROL  --------------------
+pelec.cfl         = 0.25
+pelec.init_shrink = 0.3
+pelec.change_max  = 1.1
+pelec.dt_cutoff   = 5.e-20
+
+# ------------------  DIAGNOSTICS / VERBOSITY  --------------
+pelec.sum_interval = 10
+pelec.v            = 1
+amr.v              = 1
+
+# ------------------  REFINEMENT  ---------------------------
+amr.max_level       = 0
+amr.blocking_factor = 4
+amr.max_grid_size   = 64
+amr.n_error_buf     = 2 2 2 2
+
+# ------------------  CHECKPOINTS  --------------------------
+amr.checkpoint_files_output = 0
+amr.check_file              = chk
+amr.check_int               = 5000
+
+# ------------------  PLOTFILES  ---------------------------
+amr.plot_files_output = 1
+amr.plot_file         = RESULTS/pltADV_CLEM_
+amr.plot_int          = 250
+amr.derive_plot_vars  = density xmom eden Temp pressure x_velocity
+pelec.plot_rhoy       = 0
+pelec.plot_massfrac   = 1
+
+# ------------------  PROBLEM PARAMETERS  ------------------
+prob.p_amb        = 1013250.0
+prob.pmf_datafile = "LiDryer_H2_p1_phi0_4000tu0300.dat"
+prob.x_flame      = 0.35
+
+amrex.signal_handling = 0
+
+# ------------------  CLEM (Fernando-Clem)  ------------------
+clem.verbose            = 1
+clem.self_test_regrid   = 1
+clem.freeze_species     = 1
+clem.plot_int           = 250
+clem.pressure_coupling  = 1
+clem.couple_back        = 1
+clem.couple_back_energy = 1
+clem.regrid_int         = 1
+clem.do_diffusion           = 0
+clem.diffusion_cfl          = 0.5
+clem.diffusion_max_substeps = 1000
+clem.vol_renorm          = 1
+
+pelec.chem_integrator = "ReactorCvode"
+cvode.solve_type      = GMRES

@@ -90,6 +90,33 @@ function(build_pele_exe pele_exe_name pele_physics_lib_name)
                    ${SRC_DIR}/Particle.cpp)
   endif()
 
+  # Fernando-Clem: CLEM subgrid model sources and defines
+  if(PELE_ENABLE_CLEM)
+    target_compile_definitions(${pele_exe_name} PRIVATE CLEM_MODEL=1)
+    if(PELE_CLEM_NLEM GREATER 0)
+      target_compile_definitions(${pele_exe_name} PRIVATE CLEM_NLEM=${PELE_CLEM_NLEM})
+    endif()
+    target_sources(${pele_exe_name} PRIVATE
+                   ${SRC_DIR}/Clem/ClemIndex.H
+                   ${SRC_DIR}/Clem/ClemParticleContainer.H
+                   ${SRC_DIR}/Clem/ClemManager.H
+                   ${SRC_DIR}/Clem/ClemManager.cpp
+                   ${SRC_DIR}/Clem/ClemEosUtil.H
+                   ${SRC_DIR}/Clem/ClemScratch.H
+                   ${SRC_DIR}/Clem/ClemAdvection.H
+                   ${SRC_DIR}/Clem/ClemRegrid.H
+                   ${SRC_DIR}/Clem/ClemRegrid.cpp
+                   ${SRC_DIR}/Clem/ClemSplicing.H
+                   ${SRC_DIR}/Clem/ClemSplicing.cpp
+                   ${SRC_DIR}/Clem/ClemDiffusion.H
+                   ${SRC_DIR}/Clem/ClemDiffusion.cpp
+                   ${SRC_DIR}/Clem/ClemAlgorithm.H
+                   ${SRC_DIR}/Clem/ClemAlgorithm.cpp
+                   ${SRC_DIR}/Clem/ClemLesCoupling.H
+                   ${SRC_DIR}/Clem/ClemLesCoupling.cpp)
+    target_include_directories(${pele_exe_name} PRIVATE ${SRC_DIR}/Clem)
+  endif()
+
   if(PELE_PHYSICS_ENABLE_SOOT)
       target_sources(${pele_exe_name} PRIVATE
                    ${SRC_DIR}/Soot.cpp)

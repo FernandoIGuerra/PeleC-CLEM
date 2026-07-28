@@ -13,6 +13,14 @@
 #ifdef PELE_USE_SPRAY
 #include "SprayParticles.H"
 #endif
+// Fernando-Clem: CLEM manager (container + cell map) and operators
+#ifdef CLEM_MODEL
+#include "ClemManager.H"
+#include "ClemAdvection.H"
+#include "ClemRegrid.H"
+#include "ClemSplicing.H"
+#include "ClemAlgorithm.H"
+#endif
 #endif
 
 #ifdef PELE_USE_SOOT
@@ -67,6 +75,11 @@ bool PeleC::do_diffuse = false;
 bool PeleC::do_spray_particles = true;
 #else
 bool PeleC::do_spray_particles = false;
+#endif
+
+// Fernando-Clem: manager instance lives here (mirrors SprayPC in Particle.cpp)
+#ifdef CLEM_MODEL
+std::unique_ptr<clem::ClemManager> PeleC::ClemM = nullptr;
 #endif
 
 #ifdef PELE_USE_SOOT
@@ -408,6 +421,11 @@ PeleC::read_params()
   readSprayParams();
 #endif
 
+// Fernando-Clem: read clem.* inputs
+#ifdef CLEM_MODEL
+  readClemParams();
+#endif
+
 #ifdef PELE_USE_SOOT
   pp.query("add_soot_src", add_soot_src);
   pp.query("plot_soot", plot_soot);
@@ -706,11 +724,320 @@ PeleC::initData()
   }
 #endif
 
+// Fernando-Clem: seed the LEM elements and copy the t=0 LES state onto them
+// (level 0 only for now)
+#ifdef CLEM_MODEL
+  if (level == 0) {
+    initClem();
+  }
+#endif
+
   if (verbose != 0) {
     amrex::Print() << "Done initializing level " << level << " data "
                    << std::endl;
   }
 }
+
+#ifdef CLEM_MODEL
+void
+PeleC::readClemParams()
+{
+  clem::ClemManager::readParams();
+}
+
+void
+PeleC::initClem()
+{
+  BL_PROFILE("PeleC::initClem()");
+  AMREX_ALWAYS_ASSERT(ClemM == nullptr);
+  // Fernando-Clem: the flux capture and clemAdvance hooks live in the MOL
+  // path only; the SDC path would silently skip the subgrid
+  if (!do_mol) {
+    amrex::Abort("CLEM requires pelec.do_mol = 1");
+  }
+  const int lev = 0; // Fernando-Clem: level-0 only for now
+
+  ClemM = std::make_unique<clem::ClemManager>();
+  ClemM->define(parent);
+  // Fernando-Clem: BC types and the face-flux buffer used by the splicing
+  // operator (the LES coupling fills the fluxes every step)
+  ClemM->setPhysBC(phys_bc);
+  ClemM->defineFluxContainer(lev);
+  ClemM->initParticles(lev);
+  ClemM->rebuildCellMap(lev);
+
+  // Fernando-Clem: t=0 - every element inherits the state of its host cell
+  const amrex::MultiFab& S_new = get_new_data(State_Type);
+  ClemM->setParticlesFromState(lev, S_new, Density, Temp, Eint, FirstSpec);
+
+  // Fernando-Clem: fail loudly if the structure is inconsistent at t=0
+  if (!ClemM->verifyCellMap(lev)) {
+    amrex::Abort("CLEM: cell map verification failed at initialization");
+  }
+
+  // Fernando-Clem: t=0 conservation check - sum of element masses must equal
+  // the LES mass (rho * V_cell summed over the level)
+  const auto* dx = geom.CellSize();
+  amrex::Real cell_vol = 1.0;
+  for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+    cell_vol *= dx[d];
+  }
+  const amrex::Real mass_les = S_new.sum(Density) * cell_vol;
+  const amrex::Real mass_lem = ClemM->sumParticleReal(lev, clem::RealData::mass);
+  amrex::Print() << "CLEM: t=0 mass: LES = " << mass_les  << ", LEM elements = " << mass_lem << '\n';
+
+  // Fernando-Clem: full plotfile (grid + embedded particles) so ParaView can
+  // read it; particle data lands in plt_clem_init/particles
+  ClemM->writePlotFile("plt_clem_init", "particles");
+
+  // Fernando-Clem: regrid self-test (clem.self_test_regrid = 1). At t=0 all
+  // elements already have equal mass, so the regrid must be an identity map:
+  // totals conserved and the field unchanged (compare plt_clem_regrid against
+  // plt_clem_init)
+  amrex::ParmParse ppclem("clem");
+  bool self_test_regrid = false;
+  ppclem.query("self_test_regrid", self_test_regrid);
+  if (self_test_regrid) {
+    const amrex::Real m0 = ClemM->sumParticleReal(lev, clem::RealData::mass);
+    const amrex::Real e0 = ClemM->sumMassWeighted(lev, clem::RealData::eint);
+    clem::Regridder::regrid(*ClemM, lev);
+    const amrex::Real m1 = ClemM->sumParticleReal(lev, clem::RealData::mass);
+    const amrex::Real e1 = ClemM->sumMassWeighted(lev, clem::RealData::eint);
+    amrex::Print() << "CLEM: regrid self-test: mass " << m0 << " -> " << m1<< ", energy " << e0 << " -> " << e1 << '\n';
+    if (!ClemM->verifyCellMap(lev)) {
+      amrex::Abort("CLEM: cell map verification failed after regrid");
+    }
+    ClemM->writePlotFile("plt_clem_regrid", "particles");
+  }
+
+  // Fernando-Clem: splice self-test (clem.self_test_splice = 1). Uniform +x
+  // transport: every cell imports F through its left face and exports F
+  // through its right face (interior masses unchanged); with F*dt = 1.5
+  // parcels the walk exercises full moves, splits, boundary inflow and
+  // outflow. Balance identity: M1 - M0 == mass_in - mass_out. The follow-up
+  // regrid restores exactly n_lem equal-mass elements per cell.
+  bool self_test_splice = false;
+  ppclem.query("self_test_splice", self_test_splice);
+  if (self_test_splice) {
+    const amrex::Real dm_ref =
+      ClemM->sumParticleReal(lev, clem::RealData::mass) /
+      static_cast<amrex::Real>(
+        geom.Domain().numPts() * static_cast<long>(clem::config::n_lem));
+    const amrex::Real fmass = 1.5 * dm_ref;
+    amrex::MultiFab& ff = ClemM->fluxFaces();
+    ff.setVal(0.0);
+    ff.setVal(fmass, static_cast<int>(clem::advection::Face::Left), 1);
+    ff.setVal(-fmass, static_cast<int>(clem::advection::Face::Right), 1);
+
+    // Fernando-Clem: FillPatched state; ghost cells hold the bcnormal inflow
+    // values that seed injected parcels at the domain inlet
+    amrex::MultiFab Sb(grids, dmap, NVAR, 1, amrex::MFInfo(), Factory());
+    FillPatch(*this, Sb, 1, state[State_Type].curTime(), State_Type, 0, NVAR);
+
+    const amrex::Real m0 = ClemM->sumParticleReal(lev, clem::RealData::mass);
+    const clem::SpliceBalance bal = clem::SplicingOperator::splice(
+      *ClemM, lev, 1.0, Sb, Density, Temp, Eint, FirstSpec);
+    const amrex::Real m1 = ClemM->sumParticleReal(lev, clem::RealData::mass);
+    amrex::Print() << "CLEM: splice self-test: mass " << m0 << " -> " << m1
+                   << ", in = " << bal.mass_in << ", out = " << bal.mass_out
+                   << ", balance error = "
+                   << ((m1 - m0) - (bal.mass_in - bal.mass_out)) << '\n';
+
+    clem::Regridder::regrid(*ClemM, lev);
+    const amrex::Real m2 = ClemM->sumParticleReal(lev, clem::RealData::mass);
+    amrex::Print() << "CLEM: splice+regrid: mass after regrid = " << m2
+                   << '\n';
+    if (!ClemM->verifyCellMap(lev)) {
+      amrex::Abort("CLEM: cell map verification failed after splice+regrid");
+    }
+    ClemM->writePlotFile("plt_clem_splice", "particles");
+  }
+
+  // Fernando-Clem: interface-tracking self-test (clem.self_test_advect = 1).
+  // PURE transport of the splice+regrid operator, decoupled from the hydro dt:
+  // seed a uniform equal-mass line with a square wave in temperature (a passive
+  // marker; density/composition are uniform so nothing feeds back), then drive
+  // it with a prescribed uniform +x mass flux and iterate [splice -> regrid].
+  // Each step advects clem.advect_cfl parcels/cell, i.e. advect_cfl/n_lem of a
+  // cell, so the square translates a KNOWN distance with a known exact answer -
+  // any spreading of the top-hat is the operator's numerical (over-)diffusion.
+  bool self_test_advect = false;
+  ppclem.query("self_test_advect", self_test_advect);
+  if (self_test_advect) {
+    int adv_steps = 1000;
+    amrex::Real adv_cfl = 0.5;   // parcels advected per cell per iteration
+    int adv_plot_int = 100;
+    amrex::Real sq_lo = 0.35, sq_hi = 0.45, T_in = 1200.0, T_out = 300.0;
+    // Fernando-Clem: y-bounds of the square (default = x-bounds) and a diagonal
+    // switch that also drives +y transport, so a 2-D box advects along (1,1)
+    amrex::Real sqy_lo = 0.35, sqy_hi = 0.45;
+    bool adv_diagonal = false;
+    ppclem.query("advect_steps", adv_steps);
+    ppclem.query("advect_cfl", adv_cfl);
+    ppclem.query("advect_plot_int", adv_plot_int);
+    ppclem.query("advect_square_lo", sq_lo);
+    ppclem.query("advect_square_hi", sq_hi);
+    ppclem.query("advect_square_lo_y", sqy_lo);
+    ppclem.query("advect_square_hi_y", sqy_hi);
+    ppclem.query("advect_diagonal", adv_diagonal);
+    ppclem.query("advect_T_in", T_in);
+    ppclem.query("advect_T_out", T_out);
+
+    // Fernando-Clem: Zalesak slotted-disk in solid-body rotation about
+    // (rot_cx, rot_cy). The flux field u = -w(y-cy), v = w(x-cx) is steady, so
+    // the face mass fluxes are set once. dtheta = w*dt is the rotation/step;
+    // one revolution = 2*pi/dtheta steps. Disk of radius disk_r at
+    // (disk_cx, disk_cy) with a rectangular slot cut out.
+    bool adv_rotate = false;
+    amrex::Real dtheta = 0.00748;                    // rad per step
+    amrex::Real rot_cx = 0.5, rot_cy = 0.5;          // rotation center
+    amrex::Real disk_cx = 0.5, disk_cy = 0.75, disk_r = 0.15;
+    amrex::Real slot_hw = 0.025, slot_ylo = 0.60, slot_yhi = 0.85;
+    ppclem.query("advect_rotate", adv_rotate);
+    ppclem.query("advect_dtheta", dtheta);
+    ppclem.query("advect_rot_cx", rot_cx);
+    ppclem.query("advect_rot_cy", rot_cy);
+    ppclem.query("advect_disk_cx", disk_cx);
+    ppclem.query("advect_disk_cy", disk_cy);
+    ppclem.query("advect_disk_r", disk_r);
+    ppclem.query("advect_slot_hw", slot_hw);
+    ppclem.query("advect_slot_ylo", slot_ylo);
+    ppclem.query("advect_slot_yhi", slot_yhi);
+
+    const auto* dxc = geom.CellSize();
+    amrex::Real vcell = 1.0;
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+      vcell *= dxc[d];
+    }
+    const amrex::Real rho0 = 1.0e-3;
+    const amrex::Real vol_p = vcell / static_cast<amrex::Real>(clem::config::n_lem);
+    const amrex::Real m_p = rho0 * vol_p;
+
+    // Fernando-Clem: overwrite every element with the uniform reference state
+    // plus the square marker in T; density/mass/volume/composition are uniform
+    for (clem::ClemParIter pti(ClemM->particleContainer(), lev); pti.isValid();
+         ++pti) {
+      auto& parts = pti.GetArrayOfStructs();
+      for (auto& p : parts) {
+        p.rdata(clem::RealData::rho) = rho0;
+        p.rdata(clem::RealData::mass) = m_p;
+        p.rdata(clem::RealData::vol) = vol_p;
+        p.rdata(clem::RealData::press) = 0.0;
+        p.rdata(clem::RealData::xflux) = 0.0;
+        for (int sp = 0; sp < NUM_SPECIES; ++sp) {
+          p.rdata(clem::RealData::Y0 + sp) = 0.0;
+        }
+        p.rdata(clem::RealData::Y0 + NUM_SPECIES - 1) = 1.0; // pure bath (N2)
+        const amrex::Real xp = p.pos(0);
+        const amrex::Real yp = p.pos(1);
+        bool in_shape;
+        if (adv_rotate) {
+          // Fernando-Clem: Zalesak disk = circle minus the slot rectangle
+          const amrex::Real rr = std::sqrt(
+            (xp - disk_cx) * (xp - disk_cx) + (yp - disk_cy) * (yp - disk_cy));
+          const bool in_slot = (std::abs(xp - disk_cx) <= slot_hw) &&
+                               (yp >= slot_ylo && yp <= slot_yhi);
+          in_shape = (rr <= disk_r) && !in_slot;
+        } else {
+          in_shape = (xp >= sq_lo && xp <= sq_hi) &&
+                     (!adv_diagonal || (yp >= sqy_lo && yp <= sqy_hi));
+        }
+        p.rdata(clem::RealData::T) = in_shape ? T_in : T_out;
+      }
+    }
+    ClemM->rebuildCellMap(lev);
+    ClemM->writePlotFile("plt_adv_00000", "particles");
+
+    amrex::MultiFab Sb(grids, dmap, NVAR, 1, amrex::MFInfo(), Factory());
+    FillPatch(*this, Sb, 1, state[State_Type].curTime(), State_Type, 0, NVAR);
+
+    const amrex::Real fmass = adv_cfl * m_p;
+    amrex::MultiFab& ff = ClemM->fluxFaces();
+    const amrex::Real* plo = geom.ProbLo();
+
+    // Fernando-Clem: for solid-body rotation the flux field is steady - build
+    // the per-face mass fluxes once. Incoming-positive convention; the field is
+    // divergence-free so every cell's four faces sum to zero (mass conserved).
+    if (adv_rotate) {
+      ff.setVal(0.0);
+      const int fL = static_cast<int>(clem::advection::Face::Left);
+      const int fR = static_cast<int>(clem::advection::Face::Right);
+      const int fB = static_cast<int>(clem::advection::Face::Bottom);
+      const int fT = static_cast<int>(clem::advection::Face::Top);
+      for (amrex::MFIter mfi(ff); mfi.isValid(); ++mfi) {
+        const amrex::Box& bx = mfi.validbox();
+        auto arr = ff.array(mfi);
+        for (amrex::IntVect iv = bx.smallEnd(); iv <= bx.bigEnd(); bx.next(iv)) {
+          const amrex::Real xcn = plo[0] + (iv[0] + 0.5) * dxc[0];
+          const amrex::Real ycn = plo[1] + (iv[1] + 0.5) * dxc[1];
+          // mass crossing each face per step (displacement = velocity*dt):
+          //   u*dt = -dtheta*(y-cy),  v*dt =  dtheta*(x-cx)
+          arr(iv, fL) = rho0 * (-dtheta * (ycn - rot_cy)) * dxc[1];
+          arr(iv, fR) = rho0 * (dtheta * (ycn - rot_cy)) * dxc[1];
+          arr(iv, fB) = rho0 * (dtheta * (xcn - rot_cx)) * dxc[0];
+          arr(iv, fT) = rho0 * (-dtheta * (xcn - rot_cx)) * dxc[0];
+        }
+      }
+      amrex::Print() << "CLEM: self_test_advect: ROTATE (Zalesak), dtheta = "
+                     << dtheta << " rad/step (" << 2.0 * M_PI / dtheta
+                     << " steps/rev), disk r=" << disk_r << " at (" << disk_cx
+                     << "," << disk_cy << ")\n";
+    } else {
+      amrex::Print() << "CLEM: self_test_advect: " << adv_steps
+                     << " iterations, cfl = " << adv_cfl << " parcels/cell ("
+                     << adv_cfl / clem::config::n_lem << " cell/step), "
+                     << (adv_diagonal ? "DIAGONAL (1,1)" : "+x only") << '\n';
+    }
+
+    for (int s = 1; s <= adv_steps; ++s) {
+      if (!adv_rotate) {
+        ff.setVal(0.0);
+        ff.setVal(fmass, static_cast<int>(clem::advection::Face::Left), 1);
+        ff.setVal(-fmass, static_cast<int>(clem::advection::Face::Right), 1);
+        if (adv_diagonal) {
+          ff.setVal(fmass, static_cast<int>(clem::advection::Face::Bottom), 1);
+          ff.setVal(-fmass, static_cast<int>(clem::advection::Face::Top), 1);
+        }
+      }
+      clem::SplicingOperator::splice(
+        *ClemM, lev, 1.0, Sb, Density, Temp, Eint, FirstSpec);
+      clem::Regridder::regrid(*ClemM, lev);
+      if (adv_plot_int > 0 && s % adv_plot_int == 0) {
+        ClemM->writePlotFile(
+          amrex::Concatenate("plt_adv_", s, 5), "particles");
+      }
+    }
+    amrex::Print() << "CLEM: self_test_advect done\n";
+  }
+}
+
+void
+PeleC::clemAdvance(const amrex::Real /*time*/, const amrex::Real dt)
+{
+  if (level != 0 || ClemM == nullptr || !ClemM->isDefined()) {
+    return;
+  }
+  BL_PROFILE("PeleC::clemAdvance()");
+
+  // Fernando-Clem: thin hook - the subgrid step itself is composed in
+  // clem::Algorithm (alpaca-style module). flux_scale = 0.5 averages the two
+  // accumulated MOL stages; Sborder still holds the t+dt FillPatch of the
+  // corrector stage (ghost cells carry the bcnormal inflow state)
+  amrex::MultiFab& S_new = get_new_data(State_Type);
+  amrex::MultiFab& S_old = get_old_data(State_Type);
+  // Fernando-Clem: the subgrid runs on the host over the particle AoS, so the
+  // diffusion stage gets the HOST transport-parameter block
+  clem::Algorithm::advance(
+    *ClemM, 0, dt, Sborder, S_new, S_old, Density, Xmom, Eden, Temp, Eint,
+    FirstSpec, 0.5, parent->levelSteps(0), &trans_parms.host_parm());
+
+  // Fernando-Clem: the write-back changed (rho Y_k, rho e); make UTEMP
+  // EOS-consistent again
+  if (clem::ClemManager::coupleBack()) {
+    computeTemp(S_new, 0);
+  }
+}
+#endif
 
 void
 PeleC::init(AmrLevel& old)

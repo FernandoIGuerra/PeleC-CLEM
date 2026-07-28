@@ -7,7 +7,8 @@ PeleC::getMOLSrcTerm(
   amrex::MultiFab& MOLSrcTerm,
   const amrex::Real /*time*/,
   const amrex::Real dt,
-  const amrex::Real reflux_factor)
+  const amrex::Real reflux_factor,
+  amrex::MultiFab* clem_flux)
 {
   BL_PROFILE("PeleC::getMOLSrcTerm()");
   if (
@@ -404,6 +405,26 @@ PeleC::getMOLSrcTerm(
               diffusion_flux[dir].box(), Density, NVAR, diffusion_flux_arr[dir],
               hydro_flux_arr[dir], 1.0, 1.0, flx[dir]);
           }
+        }
+      }
+
+      // Fernando-Clem: accumulate the signed incoming extensive mass flux at
+      // every cell face for the CLEM splicing (comps 2*dir = low face,
+      // 2*dir+1 = high face; positive = mass entering the cell)
+      if (clem_flux != nullptr) {
+        auto cf = clem_flux->array(mfi);
+        for (int dir = 0; dir < AMREX_SPACEDIM; ++dir) {
+          const auto& fdir = flx[dir];
+          const int di = (dir == 0) ? 1 : 0;
+          const int dj = (dir == 1) ? 1 : 0;
+          const int dk = (dir == 2) ? 1 : 0;
+          const int clo = 2 * dir;
+          const int chi = 2 * dir + 1;
+          amrex::ParallelFor(
+            vbox, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+              cf(i, j, k, clo) += fdir(i, j, k, URHO);
+              cf(i, j, k, chi) -= fdir(i + di, j + dj, k + dk, URHO);
+            });
         }
       }
 

@@ -7,6 +7,11 @@
 #include "SprayParticles.H"
 #endif
 
+// Fernando-Clem: manager (flux buffer + freeze flag) used by the MOL hooks
+#ifdef CLEM_MODEL
+#include "ClemManager.H"
+#endif
+
 amrex::Real
 PeleC::advance(
   amrex::Real time, amrex::Real dt, int amr_iteration, int amr_ncycle)
@@ -66,6 +71,14 @@ PeleC::do_mol_advance(
   amrex::MultiFab& S_old = get_old_data(State_Type);
   amrex::MultiFab& S_new = get_new_data(State_Type);
 
+// Fernando-Clem: when the subgrid is active it owns reaction (and the
+// species/energy write-back); the LES reaction path is skipped entirely
+#ifdef CLEM_MODEL
+  const bool clem_active = (level == 0 && ClemM != nullptr && ClemM->isDefined());
+#else
+  const bool clem_active = false;
+#endif
+
   amrex::MultiFab molSrc(grids, dmap, NVAR, 0, amrex::MFInfo(), Factory());
 
   amrex::MultiFab molSrc_old;
@@ -75,7 +88,7 @@ PeleC::do_mol_advance(
     molSrc_new.define(grids, dmap, NVAR, 0, amrex::MFInfo(), Factory());
   }
 
-  if (!do_react) {
+  if (!do_react || clem_active) {
     get_new_data(Reactions_Type).setVal(0.0);
   }
   const amrex::MultiFab& I_R = get_new_data(Reactions_Type);
@@ -97,7 +110,16 @@ PeleC::do_mol_advance(
 
   FillPatcherFill(Sborder, 0, NVAR, nGrow_FP_border, time, State_Type, 0);
   amrex::Real reflux_factor = 0.5;
-  getMOLSrcTerm(Sborder, molSrc, time, dt, reflux_factor);
+  // Fernando-Clem: capture the face mass fluxes of both MOL stages for the
+  // subgrid splicing (level 0 only); averaged and consumed in clemAdvance
+  amrex::MultiFab* clem_flux = nullptr;
+#ifdef CLEM_MODEL
+  if (clem_active) {
+    clem_flux = &ClemM->fluxFaces();
+    clem_flux->setVal(0.0);
+  }
+#endif
+  getMOLSrcTerm(Sborder, molSrc, time, dt, reflux_factor, clem_flux);
 
   // Build other (non-diffusion) sources at t_old
   for (int src : src_list) {
@@ -113,11 +135,20 @@ PeleC::do_mol_advance(
     amrex::MultiFab::Copy(molSrc_old, molSrc, 0, 0, NVAR, 0);
   }
 
+// Fernando-Clem: optionally freeze rho*Y_k in the LES (clem.freeze_species=1)
+// - the subgrid then owns the species transport entirely
+#ifdef CLEM_MODEL
+  if (clem::ClemManager::freezeSpecies()) {
+    molSrc.setVal(0.0, FirstSpec, NUM_SPECIES, 0);
+  }
+#endif
+
   // U^* = U^n + dt*S^n
   amrex::MultiFab::LinComb(S_new, 1.0, Sborder, 0, dt, molSrc, 0, 0, NVAR, 0);
 
   // U^{n+1,*} = U^n + dt*S^n + dt*I_R
-  if (do_react) {
+  // Fernando-Clem: I_R is zero when the subgrid owns reaction
+  if (do_react && !clem_active) {
     amrex::MultiFab::Saxpy(S_new, dt, I_R, 0, FirstSpec, NUM_SPECIES, 0);
     amrex::MultiFab::Saxpy(S_new, dt, I_R, NUM_SPECIES, Eden, 1, 0);
   }
@@ -131,7 +162,7 @@ PeleC::do_mol_advance(
 
   FillPatcherFill(Sborder, 0, NVAR, nGrow_FP_border, time + dt, State_Type, 0);
   reflux_factor = mol_iters > 1 ? 0 : 0.5;
-  getMOLSrcTerm(Sborder, molSrc, time, dt, reflux_factor);
+  getMOLSrcTerm(Sborder, molSrc, time, dt, reflux_factor, clem_flux);
 
   // Build other (non-diffusion) sources at t_new
   for (int src : src_list) {
@@ -143,21 +174,28 @@ PeleC::do_mol_advance(
     }
   }
 
+// Fernando-Clem: same species freeze for the corrector stage
+#ifdef CLEM_MODEL
+  if (clem::ClemManager::freezeSpecies()) {
+    molSrc.setVal(0.0, FirstSpec, NUM_SPECIES, 0);
+  }
+#endif
+
   // U^{n+1.**} = 0.5*(U^n + U^{n+1,*}) + 0.5*dt*S^{n+1} = U^n + 0.5*dt*S^n +
   // 0.5*dt*S^{n+1} + 0.5*dt*I_R
   amrex::MultiFab::LinComb(S_new, 0.5, Sborder, 0, 0.5, S_old, 0, 0, NVAR, 0);
-  amrex::MultiFab::Saxpy(
-    S_new, 0.5 * dt, molSrc, 0, 0, NVAR,
-    0); //  NOTE: If I_R=0, we are done and U_new is the final new-time state
+  //  NOTE: If I_R=0, we are done and U_new is the final new-time state
+  amrex::MultiFab::Saxpy( S_new, 0.5 * dt, molSrc, 0, 0, NVAR, 0); 
 
-  if (do_react) {
+
+  // Fernando-Clem: LES reaction skipped when the subgrid owns it
+  if (do_react && !clem_active) {
     amrex::MultiFab::Saxpy(S_new, 0.5 * dt, I_R, 0, FirstSpec, NUM_SPECIES, 0);
     amrex::MultiFab::Saxpy(S_new, 0.5 * dt, I_R, NUM_SPECIES, Eden, 1, 0);
 
     // F_{AD} = (1/dt)(U^{n+1,**} - U^n) - I_R = 0.5*(S^{n}+S^{n+1}(which is a
     // guess!))
-    amrex::MultiFab::LinComb(
-      molSrc, 1.0 / dt, S_new, 0, -1.0 / dt, S_old, 0, 0, NVAR, 0);
+    amrex::MultiFab::LinComb(molSrc, 1.0 / dt, S_new, 0, -1.0 / dt, S_old, 0, 0, NVAR, 0);
     amrex::MultiFab::Subtract(molSrc, I_R, 0, FirstSpec, NUM_SPECIES, 0);
     amrex::MultiFab::Subtract(molSrc, I_R, NUM_SPECIES, Eden, 1, 0);
 
@@ -167,7 +205,8 @@ PeleC::do_mol_advance(
 
   computeTemp(S_new, 0);
 
-  if (do_react) {
+  // Fernando-Clem: LES reaction iterations skipped when the subgrid owns it
+  if (do_react && !clem_active) {
     for (int mol_iter = 2; mol_iter <= mol_iters; ++mol_iter) {
       if (verbose != 0) {
         amrex::Print() << "... Re-computing MOL source term at t^{n+1} (iter = "
@@ -189,6 +228,12 @@ PeleC::do_mol_advance(
       computeTemp(S_new, 0);
     }
   }
+
+// Fernando-Clem: subgrid transport - splice the LEM elements with the
+// time-centered face mass fluxes, then regrid to n_lem equal-mass elements
+#ifdef CLEM_MODEL
+  clemAdvance(time, dt);
+#endif
 
   set_body_state(S_new);
 

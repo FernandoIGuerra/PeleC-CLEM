@@ -18,6 +18,12 @@ USE_EB = TRUE
 USE_SUNDIALS = TRUE
 CXXSTD = c++20
 
+# Fernando-Clem: CLEM needs AMReX particles; must be set before Make.defs
+# consumes USE_PARTICLES
+ifeq ($(CLEM_MODEL), TRUE)
+  USE_PARTICLES = TRUE
+endif
+
 include $(AMREX_HOME)/Tools/GNUMake/Make.defs
 
 # PeleC uses a coarse grained OMP approach
@@ -137,6 +143,18 @@ ifeq ($(USE_PARTICLES), TRUE)
     Bpack += $(SPRAY_HOME)/Make.package $(SPRAY_HOME)/Distribution/Make.package $(SPRAY_HOME)/BreakupSplash/Make.package
     Blocs += $(SPRAY_HOME) $(SPRAY_HOME)/Distribution $(SPRAY_HOME)/BreakupSplash
   endif
+endif
+
+# Fernando-Clem: CLEM subgrid model (USE_PARTICLES already forced above, so
+# the spray section added Pdirs += Particle)
+ifeq ($(CLEM_MODEL), TRUE)
+  DEFINES += -DCLEM_MODEL
+  ifdef CLEM_NLEM
+    DEFINES += -DCLEM_NLEM=$(CLEM_NLEM)
+  endif
+  CLEM_HOME = $(PELE_HOME)/Source/Clem
+  Bpack += $(CLEM_HOME)/Make.package
+  Blocs += $(CLEM_HOME)
 endif
 
 # Soot
