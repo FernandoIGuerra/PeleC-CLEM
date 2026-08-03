@@ -1,0 +1,190 @@
+# ============================================================================
+# H2 jet in supersonic crossflow -- Jin et al., Combust. Flame 268 (2024) 113627
+# Case 1 (inflow Mach 1.5), NON-REACTING, 3D, with the CLEM subgrid model ON.
+#
+# Build:  make CLEM_MODEL=TRUE CLEM_NLEM=12 -j20      (DIM = 3 in GNUmakefile)
+# Run:    mpiexec -n 20 ./PeleC3d.gnu.MPI.ex inputs-case1-nonreacting-CLEM.inp
+#
+# ---------------------------------------------------------------------------
+# WHAT IS DIFFERENT FROM inputs-case1-nonreacting.inp, AND WHY
+# ---------------------------------------------------------------------------
+# 1. amr.max_level = 0 (was 3).  MANDATORY, not a preference.  CLEM only exists
+#    on level 0 (PeleC::initClem, PeleC::clemAdvance both guard on level == 0).
+#    With refinement on, PeleC::post_timestep does reflux() + avgDown() AFTER
+#    clemAdvance has written the subgrid state back, so the fine levels would
+#    overwrite exactly the level-0 cells CLEM just updated and the filtered
+#    mean would silently decouple from rho_LES.  The level-0 mass fluxes that
+#    drive the splice would also not be the refluxed ones.  Single level is the
+#    only self-consistent configuration until CLEM is made AMR-aware.
+#    CONSEQUENCE: the 1 mm injector is resolved by ~3 cells at dx = 0.3125 mm
+#    instead of the paper's 25 at level 3.  The jet penetration and the barrel
+#    shock will be under-resolved; this run is a CLEM machinery / robustness
+#    case in 3D shocked flow, not a quantitative reproduction of Jin et al.
+#    To buy resolution back, refine uniformly (n_cell 800 96 32, ~8x the cost
+#    and ~29M LEM elements) rather than turning AMR on.
+#
+# 2. The tagging block is gone (nothing to tag with max_level = 0).
+#
+# 3. pelec.do_mol = 1 is now REQUIRED, not just the paper's choice: the flux
+#    capture and the clemAdvance hook live in the MOL path only and initClem
+#    aborts otherwise.
+#
+# ---------------------------------------------------------------------------
+# WHAT CLEM ACTUALLY DOES IN THIS RUN -- READ THIS BEFORE INTERPRETING RESULTS
+# ---------------------------------------------------------------------------
+# With freeze_species = 0 and no subgrid reaction, CLEM is DYNAMICALLY A NO-OP
+# on the LES, by construction and not by mistake.  The write-back feeds back
+# only the increment the subgrid PROCESSES (diffusion + reaction) make to the
+# per-cell filtered mean; the LEM line is periodic per cell, so subgrid
+# diffusion conserves that mean exactly and reaction is off.  The increment is
+# therefore ~0 and the resolved field stays bit-comparable to plain PeleC.
+#
+# What IS exercised, and what this run is for:
+#   - isentropic LES -> SGS pressure update under a bow shock and a barrel shock
+#   - regrid (equal-mass line restoration, sliver merging) in 3D
+#   - splice transport driven by 3D face mass fluxes, including a strongly
+#     sheared, non-grid-aligned jet -- the hardest case for the operator
+#   - ensemble-volume renormalization and the conservation diagnostics
+#   - stability and cost of the whole chain at 307,200 cells x 12 elements
+#
+# CLEM stops being a no-op only through REACTION.  Switch to the reacting case
+# for that.  To instead hand species TRANSPORT to the subgrid, set
+# clem.freeze_species = 1 -- but see the warning in the CLEM block below.
+#
+# KNOWN FIDELITY GAP IN THIS FLOW: Maxwell's Rankine-Hugoniot shock branch
+# (baseline contract items B3/B4) is NOT implemented.  The subgrid pressure
+# update is purely isentropic, so across the bow shock the LEM line is
+# compressed isentropically instead of through a shock jump.  It is stable and
+# conservative, but the subgrid thermodynamic state behind the shock is wrong.
+# This matters here far more than it did in the 1D flame.
+# ============================================================================
+
+max_step  = 100000000
+stop_time = 4.0e-4          # 0.4 ms, ~3 flow-through times
+
+# ---------------------------------------------------------------- geometry --
+# CGS. 125 x 15 x 5 mm combustor, spanwise-periodic.
+geometry.is_periodic = 0 0 1
+geometry.coord_sys   = 0
+geometry.prob_lo     = 0.0   0.0  0.0
+geometry.prob_hi     = 12.5  1.5  0.5
+
+amr.n_cell           = 400 48 16       # dx = 0.3125 mm (paper's coarse grid)
+
+# --------------------------------------------------------------------- BCs --
+# xlo   : supersonic vitiated-air inflow            (bcnormal)
+# ylo   : adiabatic no-slip wall + H2 injector hole (bcnormal)
+# yhi   : adiabatic no-slip wall
+# xhi   : supersonic outflow (first-order extrapolation)
+# z     : periodic
+pelec.lo_bc = "UserBC"  "UserBC"      "Interior"
+pelec.hi_bc = "Outflow" "NoSlipWall"  "Interior"
+
+# ----------------------------------------------------------------- physics --
+pelec.do_hydro     = 1
+pelec.do_mol       = 1        # REQUIRED by CLEM (see header), also the paper's
+pelec.mol_iorder   = 2
+pelec.diffuse_vel  = 1
+pelec.diffuse_temp = 1
+pelec.diffuse_spec = 1        # LES owns resolved diffusion (freeze_species=0)
+pelec.diffuse_enth = 1
+pelec.do_react     = 0
+pelec.do_les       = 0        # no subgrid stress model, as in the paper
+pelec.chem_integrator = "ReactorNull"
+
+# ------------------------------------------------------------- time stepping -
+pelec.cfl         = 0.1       # paper's CFL
+pelec.init_shrink = 0.1
+pelec.change_max  = 1.05
+pelec.dt_cutoff   = 1.e-14
+
+# ----------------------------------------------------------------- verbosity -
+pelec.v            = 1
+amr.v              = 1
+pelec.sum_interval = 100
+amr.data_log       = datlog
+
+# -------------------------------------------------------------------- AMR ---
+# Single level: see item 1 of the header. Do NOT raise this while CLEM is on.
+amr.max_level       = 0
+amr.blocking_factor = 8
+amr.max_grid_size   = 32
+
+# --------------------------------------------------------------------- CLEM -
+clem.verbose = 1
+# clem.verbose >= 1 prints, every step:
+#   "vol defect"        -> healthy ~1e-6 or better. Collapsing toward 1 means
+#                          the isentropic/regrid state has run away.
+#   "rho coupling err"  -> |rho_filtered - rho_LES|/rho_LES, expect ~1e-14
+#   "CLEM diffusion: substep calls = ..." -> subgrid diffusion cost per step
+
+# Species ownership. 0 = LES owns resolved species transport (2nd-order
+# Godunov) and the subgrid feeds back only its process increment.
+#
+# WARNING before setting this to 1 (Maxwell's own choice, LES stops advecting
+# rho*Y_k and the subgrid owns species transport entirely): the LEM line is 1D
+# along x with no transverse structure, so rotation and shear move mass across
+# lines and the transverse splice + regrid mass-average scrambles the profile
+# every step.  This is Maxwell's known limitation #2, measured in this repo: a
+# rotating scalar loses its peak (1200 -> 532 K) in one revolution.  A jet in
+# supersonic crossflow is exactly that flow.  freeze_species = 1 here will
+# smear the H2 plume badly.  Use 1 only deliberately, to MEASURE that ceiling.
+clem.freeze_species = 0
+
+clem.pressure_coupling  = 1   # LES -> SGS isentropic pressure work
+clem.couple_back        = 1   # SGS -> LES filtered (rho Y_k, rho e)
+clem.couple_back_energy = 1   # mode 1, conserved delta (ClemManager.H:54-63)
+clem.vol_renorm         = 1   # rescale each line to V_cell after the splice
+clem.regrid_int         = 1
+
+clem.do_react = 0             # non-reacting case
+
+# Subgrid line diffusion. Structurally INERT to the LES here (the periodic line
+# conserves the cell mean and reaction is off), so it is pure cost in this run
+# -- keep it on to exercise and time the operator in 3D, set to 0 for a faster
+# bit-identical run.  It is also the carrier of the stirring clock: clem.do_stir
+# requires clem.do_diffusion = 1.
+clem.do_diffusion           = 1
+clem.diffusion_cfl          = 0.5
+clem.diffusion_max_substeps = 1000
+
+# Stirring is OFF because it needs an eddy viscosity and this case runs with
+# pelec.do_les = 0.  To enable: clem.do_stir = 1 AND give it a nu_t source,
+# i.e. pelec.Cs > 0 (CLEM falls back to constant-coefficient Smagorinsky when
+# pelec.do_les = 0; it aborts if Cs <= 0).  That is a deviation from the paper.
+clem.do_stir = 0
+
+# Particle plotfiles (plt_clem_*/particles). Expensive in 3D: 3.69M elements.
+clem.plot_int = 0
+
+# ------------------------------------------------------------------ output --
+amr.checkpoint_files_output = 1
+amr.check_file = chk
+amr.check_per  = 5.0e-5
+
+amr.plot_files_output = 1
+amr.plot_file = plt
+amr.plot_per  = 1.0e-5
+amr.plot_vars        = density Temp
+amr.derive_plot_vars = x_velocity y_velocity z_velocity magvel magvort pressure MachNumber soundspeed
+pelec.plot_massfrac = 1
+pelec.plot_rhoy     = 0
+
+# ------------------------------------------------------- problem parameters --
+# Table 1 of the paper, Case 1. CGS: 1 atm = 1.01325e6 dyn/cm^2.
+prob.p_in   = 1.01325e6      # 1 atm
+prob.T_in   = 1000.0         # K
+prob.u_in   = 9.30e4         # 930 m/s -> M = 1.5
+prob.YO2_in = 0.23
+prob.YN2_in = 0.77
+
+prob.p_jet  = 1.30709e6      # 1.29 atm
+prob.T_jet  = 300.0          # K
+prob.v_jet  = 1.321e5        # 1321 m/s -> M ~ 1.0, mdot = 0.109 g/s
+prob.jet_x  = 4.2            # 42 mm from the inlet
+prob.jet_z  = 0.25           # spanwise centre
+prob.jet_d  = 0.1            # 1 mm diameter
+prob.jet_start = 0.0
+prob.jet_ramp  = 1.0e-5      # soften the injector start-up transient
+
+eb2.geom_type = "all_regular"
