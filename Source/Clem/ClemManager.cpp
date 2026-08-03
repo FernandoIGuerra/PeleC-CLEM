@@ -7,6 +7,7 @@
 #include "PelePhysics.H"
 
 #include "ClemManager.H"
+#include "ClemStirring.H"
 
 namespace clem {
 
@@ -48,6 +49,11 @@ ClemManager::readParams()
   pp.query("diffusion_cfl", m_diffusion_cfl);
   pp.query("diffusion_max_substeps", m_diffusion_max_substeps);
   pp.query("do_react", m_do_react);
+
+  // Fernando-Clem: the stirring closure owns its own "clem.stir_*" block
+  // (ClemStirring.H). Read AFTER m_verbose so its setup report is gated on the
+  // verbosity the user actually asked for
+  StirParams::readParams();
 
   if (m_diffusion_cfl <= 0.0 || m_diffusion_cfl > 0.5) {
     amrex::Abort(

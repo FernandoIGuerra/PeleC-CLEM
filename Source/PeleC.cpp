@@ -1025,11 +1025,32 @@ PeleC::clemAdvance(const amrex::Real /*time*/, const amrex::Real dt)
   // corrector stage (ghost cells carry the bcnormal inflow state)
   amrex::MultiFab& S_new = get_new_data(State_Type);
   amrex::MultiFab& S_old = get_old_data(State_Type);
+
+  // Fernando-Clem: read-only view of the LES model this run is ACTUALLY using.
+  // The stirring closure forms nu_t from it rather than from a private
+  // Smagorinsky coefficient, so the subgrid scalar mixing and the resolved
+  // subgrid stress cannot disagree about how much turbulence there is
+  clem::LesView les;
+  les.do_les = do_les;
+  // Fernando-Clem: pelec.les_model is only PARSED when pelec.do_les = 1 (see
+  // read_params), so with PeleC's own LES term off it would still read as its
+  // default and silently ignore an les_model the user set. Pin it to 0 there:
+  // constant-coefficient Smagorinsky, nu_t = pelec.Cs^2 Delta^2 |S|, which
+  // CLEM evaluates from the resolved field on its own. pelec.Cs and pelec.Cw
+  // ARE parsed unconditionally, so the coefficient is always the user's
+  les.model = do_les ? les_model : 0;
+  les.Cs = Cs;
+  les.Cw = Cw;
+  if (les.model == 1 && LES_Coeffs.ok()) {
+    les.coeffs = &LES_Coeffs;
+    les.cs2_comp = comp_Cs2;
+  }
+
   // Fernando-Clem: the subgrid runs on the host over the particle AoS, so the
   // diffusion stage gets the HOST transport-parameter block
   clem::Algorithm::advance(
     *ClemM, 0, dt, Sborder, S_new, S_old, Density, Xmom, Eden, Temp, Eint,
-    FirstSpec, 0.5, parent->levelSteps(0), &trans_parms.host_parm());
+    FirstSpec, 0.5, parent->levelSteps(0), &trans_parms.host_parm(), les);
 
   // Fernando-Clem: the write-back changed (rho Y_k, rho e); make UTEMP
   // EOS-consistent again

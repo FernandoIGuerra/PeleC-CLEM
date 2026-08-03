@@ -1,0 +1,103 @@
+# ============================================================================
+# H2 jet in supersonic crossflow -- 2D (spanwise-invariant) variant.
+#
+# NOT the paper's configuration: with DIM = 2 the circular 1 mm injector
+# degenerates into a 1 mm slot spanning the whole span, so the jet penetrates
+# much further and the global equivalence ratio is no longer 0.15. Use this
+# for development, algorithm shakedown, and cheap CLEM-vs-reference
+# comparisons -- not for quantitative comparison with Jin et al. (2024).
+#
+# Build with DIM = 2 in the GNUmakefile.
+# ============================================================================
+
+max_step  = 100000000
+stop_time = 4.0e-4
+
+# ---------------------------------------------------------------- geometry --
+geometry.is_periodic = 0 0
+geometry.coord_sys   = 0
+geometry.prob_lo     = 0.0   0.0
+geometry.prob_hi     = 12.5  1.5
+
+amr.n_cell           = 400 48
+
+# --------------------------------------------------------------------- BCs --
+pelec.lo_bc = "UserBC"  "UserBC"
+pelec.hi_bc = "Outflow" "NoSlipWall"
+
+# ----------------------------------------------------------------- physics --
+pelec.do_hydro     = 1
+pelec.do_mol       = 1
+pelec.mol_iorder   = 2
+pelec.diffuse_vel  = 1
+pelec.diffuse_temp = 1
+pelec.diffuse_spec = 1
+pelec.diffuse_enth = 1
+pelec.do_les       = 0
+
+# Chemistry off by default; flip these on for the reacting 2D run.
+pelec.do_react        = 0
+pelec.chem_integrator = "ReactorNull"
+# pelec.do_react        = 1
+# pelec.chem_integrator = "ReactorCvode"
+# cvode.solve_type      = "denseAJ_direct"
+# ode.rtol              = 1.0e-6
+# ode.atol              = 1.0e-8
+
+# ------------------------------------------------------------- time stepping -
+pelec.cfl         = 0.1
+pelec.init_shrink = 0.1
+pelec.change_max  = 1.05
+pelec.dt_cutoff   = 1.e-14
+
+# ----------------------------------------------------------------- verbosity -
+pelec.v            = 1
+amr.v              = 1
+pelec.sum_interval = 100
+amr.data_log       = datlog
+
+# -------------------------------------------------------------------- AMR ---
+amr.max_level       = 3
+amr.ref_ratio       = 2 2 2 2
+amr.regrid_int      = 2 2 2 2
+amr.blocking_factor = 8
+amr.max_grid_size   = 64
+amr.n_error_buf     = 2 2 2 2
+
+tagging.dengrad         = 2.0e-5
+tagging.max_dengrad_lev = 3
+
+tagging.refinement_indicators = injector
+tagging.injector.in_box_lo    = 3.90 -0.01
+tagging.injector.in_box_hi    = 5.20  0.35
+tagging.injector.max_level    = 3
+
+# ------------------------------------------------------------------ output --
+amr.checkpoint_files_output = 1
+amr.check_file = chk
+amr.check_per  = 5.0e-5
+
+amr.plot_files_output = 1
+amr.plot_file = plt
+amr.plot_per  = 1.0e-5
+amr.plot_vars        = density Temp
+amr.derive_plot_vars = x_velocity y_velocity magvel magvort pressure MachNumber soundspeed
+pelec.plot_massfrac = 1
+pelec.plot_rhoy     = 0
+
+# ------------------------------------------------------- problem parameters --
+prob.p_in   = 1.01325e6
+prob.T_in   = 1000.0
+prob.u_in   = 9.30e4
+prob.YO2_in = 0.23
+prob.YN2_in = 0.77
+
+prob.p_jet  = 1.30709e6
+prob.T_jet  = 300.0
+prob.v_jet  = 1.321e5
+prob.jet_x  = 4.2
+prob.jet_d  = 0.1
+prob.jet_start = 0.0
+prob.jet_ramp  = 0.0
+
+eb2.geom_type = "all_regular"

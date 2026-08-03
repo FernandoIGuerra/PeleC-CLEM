@@ -84,7 +84,8 @@ Algorithm::advance(
   const int spec_indx,
   const amrex::Real flux_scale,
   const int nstep,
-  const TransParmType* tparm)
+  const TransParmType* tparm,
+  const LesView& les)
 {
   BL_PROFILE("clem::Algorithm::advance()");
   AMREX_ALWAYS_ASSERT(mgr.isDefined());
@@ -147,6 +148,39 @@ Algorithm::advance(
   // together over it, t_clem += Delta t_diff) is implemented per-line inside
   // DiffusionOperator::diffuse (ClemDiffusion.cpp) - see the comment just
   // below for why it is composed here rather than unrolled at this level.
+
+  // Fernando-Clem: STIRRING SETUP (clem.do_stir). Delta t_stir is a property of
+  // the RESOLVED field, so its inputs are built ONCE here, before the subgrid
+  // sub-cycles, and held frozen for the whole LES step:
+  //
+  //   Delta     = filterWidth(geom)                  the largest eddy
+  //   (nu_t,|S|) = computeTurbViscosity(state_bc)    from PeleC's LES model
+  //
+  // state_bc (Sborder) is used rather than s_new because the strain rate needs
+  // one layer of FillPatched ghost cells for its central differences. The
+  // per-line clock (Delta t_stir, its epochs, and the triplet maps themselves)
+  // lives inside the diffusion sub-cycle - a triplet map is instantaneous, so
+  // it is a clip on Delta t_diff, not a stage
+  const bool do_stir = StirParams::get().do_stir;
+  amrex::MultiFab nut_strain;
+  amrex::Real filter_width = 0.0;
+  if (do_stir) {
+    // Fernando-Clem: aborts if the LES settings cannot feed the closure (no
+    // LES model -> nu_t is identically zero and stirring would be silently
+    // inert). Checked here, with the view actually handed to the closure
+    checkLesCompatibility(les);
+    const auto& geom = mgr.particleContainer().Geom(lev);
+    filter_width = filterWidth(geom);
+    nut_strain.define(
+      s_new.boxArray(), s_new.DistributionMap(), NutComp::ncomp, 0);
+    computeTurbViscosity(
+      state_bc, rho_indx, mom_indx, geom, les, nut_strain);
+  }
+
+ //############################################################################################
+  //                              START OF ZERO MACH EQUATION SOLUTION
+  //############################################################################################
+
   if (ClemManager::doDiffusion()) {
     const bool check_conservation = (ClemManager::verbose() > 1);
     ConservedTotals before;
@@ -155,18 +189,50 @@ Algorithm::advance(
     }
 
     if (ClemManager::doReact()) {
-      // Fernando-Clem: stage - diffusion and reaction CO-STEPPED over the
-      // diffusion-CFL substep (Maxwell [M §3.3.3] steps 14-20: compute
-      // Delta t_diff from the CFL restriction, diffuse+react TOGETHER over
-      // that substep, advance, repeat until dt is covered). NOT two
-      // independent full-dt stages (diffusion sub-cycling internally for the
-      // whole dt, then reaction running once on the fully-diffused end
-      // state) - Delta t_diff bounds both operators together, and reaction
-      // runs right after EACH diffusion substep, inside diffuse()'s own loop
-      // (see ReactionOperator::reactSubstep, called from ClemDiffusion.cpp).
-      diag.diffusion = DiffusionOperator::diffuse(mgr, lev, dt, tparm, &diag.reaction);
+      /**
+       * The following strategy is implemented:
+       * set t = 0.0
+       * set t_stirring = t + dt_stirring
+       * set t_LES    = t + dt_LES
+       * (.......)
+       * compute the df_diff from transport. Evalaute if dt_diff > dt_LES. then dt_diff = dt_LES
+       * now compre with dt_diff > dt_stirring then dt_diff = dt_stirring
+       * now we have the final dt_diff which is the minimum of the three.
+       * 
+       * 
+       * Do diffusion and reaction for the dt_diff using a splitting operator(as implemented here).
+       * increase t = t + dt_diff and t_stirring = t + dt_stirring
+       * 
+       * if t > t_stirring apply stirring  
+       * complete the t_LES
+       * 
+       * Note that the t_stirring is unique and also the dt_stirring. Then only change is the dt_diffusion becasue the trasnport changes
+       *
+       * Fernando-Clem: IMPLEMENTED, one level down - the loop is PER LINE, so
+       * it lives inside DiffusionOperator::diffuse (ClemDiffusion.cpp, the
+       * "STIRRING" block) rather than here: every cell has its own dt_stirring
+       * (its own nu_t, |S| and molecular nu) and its own epoch sequence, so
+       * there is nothing to schedule at level granularity. What IS done at this
+       * level is the part that is common to all lines and must be evaluated
+       * once per LES step - Delta and the (nu_t, |S|) field, built just above.
+       *
+       * Mapping of the strategy onto that loop:
+       *   t = 0, t_stirring = dt_stirring   latched before the while loop
+       *   t_LES = dt                        the while condition
+       *   dt_diff = stableSubStep()         recomputed every iteration
+       *   clip to t_LES - t, then to t_stirring - t   the three-way minimum
+       *   diffuse + react over dt_diff      advanceLine + reactSubstep
+       *   t += dt_diff                      then, if t >= t_stirring, ONE
+       *                                     triplet map and t_stirring +=
+       *                                     dt_stirring
+       */
+      diag.diffusion = DiffusionOperator::diffuse(
+        mgr, lev, dt, tparm, &diag.reaction,
+        do_stir ? &nut_strain : nullptr, filter_width);
     } else {
-      diag.diffusion = DiffusionOperator::diffuse(mgr, lev, dt, tparm);
+      diag.diffusion = DiffusionOperator::diffuse(
+        mgr, lev, dt, tparm, nullptr,
+        do_stir ? &nut_strain : nullptr, filter_width);
     }
 
     if (check_conservation) {
@@ -184,17 +250,12 @@ Algorithm::advance(
     diag.reaction = ReactionOperator::react(mgr, lev, dt);
   }
 
-  // Fernando-Clem: (future stage) stirring is composed here
 
-  // Fernando-Clem: close the increment bracket BEFORE splice - sgs_incr becomes
-  // (POST filtered mean) - (PRE), i.e. exactly what diffusion+reaction changed
-  // the filtered composition/energy by, at the same (pre-splice) cell config
-  
-  //if (couple_back) {
-  //  LesCoupling::snapshotFilteredMean(mgr, lev, sgs_post); // post
-  //  amrex::MultiFab::Subtract(sgs_incr, sgs_post, 0, 0, NUM_SPECIES + 1, 0);
-  //  sgs_incr.mult(-1.0, 0, NUM_SPECIES + 1, 0); // incr = post - pre
-  //}
+
+  //############################################################################################
+  //                              END OF ZERO MACH EQUATION SOLUTION
+  //############################################################################################
+
 
   // Fernando-Clem: stage - splicing (inter-cell transport)
   diag.balance = SplicingOperator::splice(mgr, lev, dt, state_bc, rho_indx, temp_indx, eint_indx, spec_indx);
@@ -294,6 +355,37 @@ Algorithm::advance(
                        << ", drift(Y) = " << diag.diffusion.drift_species;
       }
       amrex::Print() << '\n';
+
+      // Fernando-Clem: stirring rides inside the diffusion sub-cycle, so its
+      // counters come back on the diffusion diagnostics. "rejected" is the one
+      // that matters: those eddies were drawn from f(l) and the clock advanced,
+      // but the line was too coarse to map them (< 6 elements), so the realised
+      // D_T is below target by roughly that fraction
+      if (do_stir) {
+        const amrex::Long drawn =
+          diag.diffusion.total_stir_events + diag.diffusion.n_stir_rejected;
+        const amrex::Real rej_pct =
+          (drawn > 0) ? 100.0 * static_cast<amrex::Real>(
+                                  diag.diffusion.n_stir_rejected) /
+                          static_cast<amrex::Real>(drawn)
+                      : 0.0;
+        amrex::Print() << "CLEM stirring: maps applied = "
+                       << diag.diffusion.total_stir_events << " over "
+                       << diag.diffusion.n_lines << " lines (max = "
+                       << diag.diffusion.max_stir_events
+                       << "/line), eddies rejected as too small = "
+                       << diag.diffusion.n_stir_rejected << " (" << rej_pct
+                       << "% of those drawn), lines truncated by the substep "
+                          "cap = "
+                       << diag.diffusion.n_stir_truncated << '\n';
+        if (rej_pct > 50.0) {
+          amrex::Print()
+            << "  WARNING: most sampled eddies do not fit on " << config::n_lem
+            << " elements - f(l) ~ l^-8/3 piles up just above eta, so n_lem "
+               "must reach ~6 Delta/eta. The realised D_T is far below the "
+               "closure's target; raise CLEM_NLEM.\n";
+        }
+      }
     }
     if (ClemManager::doReact()) {
       amrex::Print() << "CLEM reaction: lines = " << diag.reaction.n_lines

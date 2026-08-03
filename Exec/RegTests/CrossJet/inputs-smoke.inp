@@ -1,0 +1,79 @@
+# ============================================================================
+# Cheap smoke test: same setup as Case 1, coarsened and truncated so it runs
+# in a few minutes on a laptop. Use it to confirm the build, the injector BC
+# and the chemistry path work before launching the production runs.
+# ============================================================================
+
+max_step  = 50
+stop_time = 1.0
+
+geometry.is_periodic = 0 0 1
+geometry.coord_sys   = 0
+geometry.prob_lo     = 0.0   0.0  0.0
+geometry.prob_hi     = 12.5  1.5  0.5
+
+amr.n_cell           = 200 24 8        # dx = 0.625 mm
+
+pelec.lo_bc = "UserBC"  "UserBC"      "Interior"
+pelec.hi_bc = "Outflow" "NoSlipWall"  "Interior"
+
+pelec.do_hydro     = 1
+pelec.do_mol       = 1
+pelec.mol_iorder   = 2
+pelec.diffuse_vel  = 1
+pelec.diffuse_temp = 1
+pelec.diffuse_spec = 1
+pelec.diffuse_enth = 1
+pelec.do_les       = 0
+
+pelec.do_react        = 1
+pelec.chem_integrator = "ReactorCvode"
+cvode.solve_type      = "denseAJ_direct"
+ode.rtol              = 1.0e-6
+ode.atol              = 1.0e-8
+
+pelec.cfl         = 0.1
+pelec.init_shrink = 0.1
+pelec.change_max  = 1.05
+
+pelec.v            = 1
+amr.v              = 1
+pelec.sum_interval = 10
+
+amr.max_level       = 1
+amr.ref_ratio       = 2 2 2 2
+amr.regrid_int      = 2 2 2 2
+amr.blocking_factor = 4
+amr.max_grid_size   = 32
+amr.n_error_buf     = 2 2 2 2
+
+tagging.dengrad         = 2.0e-5
+tagging.max_dengrad_lev = 1
+
+tagging.refinement_indicators = injector
+tagging.injector.in_box_lo    = 3.90 -0.01 0.0
+tagging.injector.in_box_hi    = 5.20  0.35 0.5
+tagging.injector.max_level    = 1
+
+amr.checkpoint_files_output = 0
+amr.plot_files_output = 1
+amr.plot_file = plt
+amr.plot_int  = 10
+amr.plot_vars        = density Temp
+amr.derive_plot_vars = x_velocity y_velocity z_velocity magvel pressure MachNumber
+pelec.plot_massfrac = 1
+
+prob.p_in   = 1.01325e6
+prob.T_in   = 1000.0
+prob.u_in   = 9.30e4
+prob.YO2_in = 0.23
+prob.YN2_in = 0.77
+
+prob.p_jet  = 1.30709e6
+prob.T_jet  = 300.0
+prob.v_jet  = 1.321e5
+prob.jet_x  = 4.2
+prob.jet_z  = 0.25
+prob.jet_d  = 0.1
+
+eb2.geom_type = "all_regular"

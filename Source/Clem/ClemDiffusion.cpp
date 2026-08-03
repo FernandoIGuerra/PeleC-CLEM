@@ -3,9 +3,11 @@
 #include <limits>
 
 #include <AMReX_ParallelDescriptor.H>
+#include <AMReX_Random.H>
 
 #include "ClemDiffusion.H"
 #include "ClemEosUtil.H"
+#include "ClemStirring.H"
 
 namespace clem {
 
@@ -324,17 +326,85 @@ DiffusionOperator::advanceLine(
   }
 }
 
+void
+DiffusionOperator::tripletMap(
+  LineScratch& lscr, const int start, const int n_seg)
+{
+  const int n = lscr.n_elem;
+  if (n_seg < 6 || n_seg > n || (n_seg % 3) != 0) {
+    return; // Fernando-Clem: not a mappable segment - eddyElements guards this
+  }
+
+  // Fernando-Clem: the permutation, as an offset table within the segment.
+  // Three compressed copies of the segment, the middle one reversed:
+  //   first  third -> offsets 0, 3, 6, ...
+  //   middle third -> offsets n_seg-2, n_seg-5, ...   (reversed)
+  //   last   third -> offsets 2, 5, 8, ...
+  // Every offset in [0, n_seg) appears exactly once (verified exhaustively for
+  // every legal n_seg and start), which is why the map moves fluid without
+  // moving mass on an equal-mass line and contributes no conservation error of
+  // its own - see the header
+  const int n3 = n_seg / 3;
+  static thread_local amrex::Vector<int> src;
+  static thread_local amrex::Vector<amrex::Real> buf;
+  src.resize(n_seg);
+  buf.resize(static_cast<std::size_t>(n_seg) * (4 + NUM_SPECIES));
+
+  for (int j = 0; j < n3; ++j) {
+    src[j] = 3 * j;
+    src[n3 + j] = n_seg - 2 - 3 * j;
+    src[2 * n3 + j] = 3 * j + 2;
+  }
+
+  // Fernando-Clem: read the whole segment out first - the map is not in-place
+  // (a destination can be read after it has been written otherwise)
+  const int stride = 4 + NUM_SPECIES;
+  for (int m = 0; m < n_seg; ++m) {
+    const int l = (start + src[m]) % n; // periodic line: the segment wraps
+    amrex::Real* b = &buf[static_cast<std::size_t>(m) * stride];
+    b[0] = lscr.rho[l];
+    b[1] = lscr.T[l];
+    b[2] = lscr.eint[l];
+    b[3] = lscr.press[l];
+    for (int k = 0; k < NUM_SPECIES; ++k) {
+      b[4 + k] = lscr.Y[l * NUM_SPECIES + k];
+    }
+  }
+
+  // Fernando-Clem: element MASS is deliberately not permuted. The regrid leaves
+  // the line equal-mass, so the elements the map exchanges hold identical dm
+  // and permuting the fluid state alone is the mass-coordinate triplet map
+  for (int m = 0; m < n_seg; ++m) {
+    const int l = (start + m) % n;
+    const amrex::Real* b = &buf[static_cast<std::size_t>(m) * stride];
+    lscr.rho[l] = b[0];
+    lscr.T[l] = b[1];
+    lscr.eint[l] = b[2];
+    lscr.press[l] = b[3];
+    for (int k = 0; k < NUM_SPECIES; ++k) {
+      lscr.Y[l * NUM_SPECIES + k] = b[4 + k];
+    }
+  }
+}
+
 DiffusionOperator::Diagnostics
 DiffusionOperator::diffuse(
   ClemManager& mgr,
   const int lev,
   const amrex::Real dt,
   const TransParmType* tparm,
-  ReactionOperator::Diagnostics* react_diag)
+  ReactionOperator::Diagnostics* react_diag,
+  const amrex::MultiFab* nut_strain,
+  const amrex::Real filter_width)
 {
   BL_PROFILE("clem::DiffusionOperator::diffuse()");
   AMREX_ALWAYS_ASSERT(mgr.isDefined());
   AMREX_ALWAYS_ASSERT(tparm != nullptr);
+
+  // Fernando-Clem: stirring is on only if the caller built the (nu_t, |S|)
+  // field for it. Delta must then be a real length
+  const bool do_stir = (nut_strain != nullptr) && (filter_width > 0.0);
+  AMREX_ALWAYS_ASSERT( !do_stir || nut_strain->nComp() >= NutComp::ncomp);
 
   auto& pc = mgr.particleContainer();
   if (!mgr.IsCellMapValid()) {
@@ -371,6 +441,12 @@ DiffusionOperator::diffuse(
     const int grid_id       = pti.index();
     const amrex::Box& bx    = pti.validbox();
     auto* particles         = pti.GetArrayOfStructs().data();
+    // Fernando-Clem: the cell's LES turbulence, built once per step by
+    // clem::computeTurbViscosity (same BoxArray as the state). Held BY VALUE -
+    // an empty Array4 when stirring is off, and never dereferenced then
+    const amrex::Array4<const amrex::Real> nut_arr =
+      do_stir ? nut_strain->const_array(grid_id)
+              : amrex::Array4<const amrex::Real>{};
 
     for (amrex::IntVect iv = bx.smallEnd(); iv <= bx.bigEnd(); bx.next(iv)) {
       const auto& plist = mgr.particlesInCell(lev, grid_id, iv);
@@ -403,6 +479,33 @@ DiffusionOperator::diffuse(
       // reactClemLine retry, not once per substep
       bool line_retried               = false;
       constexpr amrex::Real time_tol  = 1.0e-12;
+      const amrex::Real tol           = time_tol * dt;
+
+      // Fernando-Clem: ===================== STIRRING =====================
+      // The stirring clock, set up ONCE per line and per LES step. dt_stir is
+      // LATCHED here and never recomputed inside the sub-cycle: its inputs are
+      // the cell's nu_t and |S|, which are properties of the RESOLVED field and
+      // are frozen while the subgrid sub-cycles. Only Delta t_diff changes from
+      // substep to substep, because only the transport coefficients do.
+      //
+      //   t_stir = t + Delta t_stir   is the next epoch
+      //   eta                          feeds the eddy-size PDF at each epoch
+      //
+      // An inactive closure (no subgrid turbulence, or the cell is resolved so
+      // there is no inertial range) leaves dt_stir = +max, the first epoch
+      // never arrives, and the loop below is EXACTLY the pre-stirring one
+      amrex::Real dt_stir = std::numeric_limits<amrex::Real>::max();
+      amrex::Real t_stir  = std::numeric_limits<amrex::Real>::max();
+      amrex::Real eta     = 0.0;
+      int n_stir          = 0;
+      if (do_stir) {
+        const amrex::Real nu   = lineViscosity(lscr, tparm);
+        const amrex::Real nu_t = nut_arr(iv, NutComp::nut);
+        const amrex::Real smag = nut_arr(iv, NutComp::strain);
+        dt_stir = computeDtStirring(nu, filter_width, nu_t, smag);
+        eta     = kolmogorovScale(nu, nu_t, smag);
+        t_stir  = dt_stir; // first epoch: t = 0 at the start of the sub-cycle
+      }
 
       while (dt - t_clem > time_tol * dt) {
         // Fernando-Clem: coefficients AND the stability limit are re-derived
@@ -412,6 +515,7 @@ DiffusionOperator::diffuse(
 
         amrex::Real dt_sub              = stableSubStep(lscr, area2);
         const amrex::Real remaining     = dt - t_clem;
+        bool forced_to_end              = false;
         if (dt_sub >= remaining) {
           // Fernando-Clem: diffusion is not (or no longer) the restrictive
           // constraint on what is left of dt - finish the line in this step
@@ -424,6 +528,18 @@ DiffusionOperator::diffuse(
           // steps later, so it is counted and shouted instead
           dt_sub            = remaining;
           capped_this_line  = true;
+          forced_to_end     = true;
+        }
+
+        // Fernando-Clem: [stir] the THIRD clip - to the next stirring epoch.
+        // dt_sub is now min(Delta t_diff, what remains of dt, t_stir - t).
+        // Clipping here is what lands the map exactly ON its epoch instead of
+        // smearing it into the middle of a transport step, and it is also what
+        // guarantees at most ONE map per substep. Skipped when the substep cap
+        // has already forced this step to the end of dt - that step is a
+        // damage-limitation step, and shortening it again would not terminate
+        if (!forced_to_end && t_clem + dt_sub > t_stir) {
+          dt_sub = t_stir - t_clem;
         }
 
         computeRates(lscr, area2);
@@ -443,11 +559,45 @@ DiffusionOperator::diffuse(
 
         t_clem += dt_sub;
         ++n_sub;
+
+        // Fernando-Clem: [stir] the epoch has been reached - fire ONE triplet
+        // map, then push the epoch forward by the (constant) Delta t_stir.
+        // Order matters: the map comes AFTER diffusion+reaction have advanced
+        // the line to t_stir, so it rearranges the state the eddy would
+        // actually have found there
+        if (t_clem >= t_stir - tol) {
+          const amrex::Real l = sampleEddySize(eta, filter_width, amrex::Random());
+          const int n_seg     = eddyElements(l, filter_width, lscr.n_elem);
+          if (n_seg > 0) {
+            // Fernando-Clem: the sampler gives the CENTRE; the map wants the
+            // first element. The line is periodic, so this wraps
+            const int centre  = sampleEddyCenter(amrex::Random(), lscr.n_elem);
+            const int start   = ((centre - n_seg / 2) % lscr.n_elem + lscr.n_elem) % lscr.n_elem;
+            tripletMap(lscr, start, n_seg);
+            ++n_stir;
+          } else {
+            // Fernando-Clem: the eddy occurred but the line is too coarse to
+            // represent it (< 6 elements). It is REJECTED, not rounded up to 6
+            // - rounding up would inject mixing at a scale the closure never
+            // asked for. The clock still advances: the event happened
+            ++diag.n_stir_rejected;
+          }
+          t_stir += dt_stir;
+        }
       }
 
       if (capped_this_line) {
         ++diag.n_capped;
       }
+      // Fernando-Clem: [stir] the substep cap jumped the sub-cycle to the end
+      // of dt with epochs still pending - those maps were silently dropped, so
+      // the realised D_T on this line is below target for reasons that have
+      // nothing to do with the closure
+      if (capped_this_line && do_stir && t_stir < dt) {
+        ++diag.n_stir_truncated;
+      }
+      diag.total_stir_events += static_cast<amrex::Long>(n_stir);
+      diag.max_stir_events = amrex::max<int>(diag.max_stir_events, n_stir);
       diag.max_substeps = amrex::max<int>(diag.max_substeps, n_sub);
       // Fernando-Clem: accumulate the TOTAL work (summed across ranks below):
       // one unit = one full-line computeRates+advanceLine sweep
@@ -479,6 +629,10 @@ DiffusionOperator::diffuse(
   amrex::ParallelDescriptor::ReduceLongSum(diag.n_clipped);
   amrex::ParallelDescriptor::ReduceLongSum(diag.n_capped);
   amrex::ParallelDescriptor::ReduceRealMax(diag.max_neg_Y);
+  amrex::ParallelDescriptor::ReduceLongSum(diag.total_stir_events);
+  amrex::ParallelDescriptor::ReduceIntMax(diag.max_stir_events);
+  amrex::ParallelDescriptor::ReduceLongSum(diag.n_stir_rejected);
+  amrex::ParallelDescriptor::ReduceLongSum(diag.n_stir_truncated);
 
   // Fernando-Clem: co-stepped reaction diagnostics - diffuse() is the only
   // place reactSubstep() is called, so it owns this reduction (react()'s

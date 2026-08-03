@@ -1,0 +1,109 @@
+# ============================================================================
+# H2 jet in supersonic crossflow -- Jin et al., Combust. Flame 268 (2024) 113627
+# Case 1 (inflow Mach 1.5), REACTING.
+#
+# Restart from the last checkpoint of inputs-case1-nonreacting.inp, i.e. from
+# a developed non-reacting flow field, and switch the chemistry on. Set
+# amr.restart to the checkpoint you want to continue from.
+#
+#   mpirun -np N ./PeleC3d.gnu.MPI.ex inputs-case1-reacting.inp amr.restart=chk00xxxxx
+# ============================================================================
+
+max_step  = 100000000
+stop_time = 1.2e-3          # 1.2 ms total, ~9 flow-through times
+
+amr.restart = chk_SET_ME
+
+# ---------------------------------------------------------------- geometry --
+geometry.is_periodic = 0 0 1
+geometry.coord_sys   = 0
+geometry.prob_lo     = 0.0   0.0  0.0
+geometry.prob_hi     = 12.5  1.5  0.5
+
+amr.n_cell           = 400 48 16
+
+# --------------------------------------------------------------------- BCs --
+pelec.lo_bc = "UserBC"  "UserBC"      "Interior"
+pelec.hi_bc = "Outflow" "NoSlipWall"  "Interior"
+
+# ----------------------------------------------------------------- physics --
+pelec.do_hydro     = 1
+pelec.do_mol       = 1
+pelec.mol_iorder   = 2
+pelec.diffuse_vel  = 1
+pelec.diffuse_temp = 1
+pelec.diffuse_spec = 1
+pelec.diffuse_enth = 1
+pelec.do_les       = 0
+
+# Finite-rate chemistry: constant-volume reactor, implicit BDF (CVODE).
+pelec.do_react        = 1
+pelec.chem_integrator = "ReactorCvode"
+cvode.solve_type      = "denseAJ_direct"
+ode.rtol              = 1.0e-6
+ode.atol              = 1.0e-8
+ode.clean_init_massfrac = 1
+
+# ------------------------------------------------------------- time stepping -
+pelec.cfl         = 0.1
+pelec.init_shrink = 1.0
+pelec.change_max  = 1.05
+pelec.dt_cutoff   = 1.e-14
+
+# ----------------------------------------------------------------- verbosity -
+pelec.v            = 1
+amr.v              = 1
+pelec.sum_interval = 100
+amr.data_log       = datlog
+
+# -------------------------------------------------------------------- AMR ---
+amr.max_level       = 3
+amr.ref_ratio       = 2 2 2 2
+amr.regrid_int      = 2 2 2 2
+amr.blocking_factor = 8
+amr.max_grid_size   = 32
+amr.n_error_buf     = 2 2 2 2
+
+tagging.dengrad         = 2.0e-5
+tagging.max_dengrad_lev = 3
+
+tagging.refinement_indicators = injector flame
+tagging.injector.in_box_lo    = 3.90 -0.01 0.0
+tagging.injector.in_box_hi    = 5.20  0.35 0.5
+tagging.injector.max_level    = 3
+
+# Track the flame in addition to the density gradient.
+tagging.flame.field_name    = Temp
+tagging.flame.value_greater = 1500.0
+tagging.flame.max_level     = 3
+
+# ------------------------------------------------------------------ output --
+amr.checkpoint_files_output = 1
+amr.check_file = chk
+amr.check_per  = 5.0e-5
+
+amr.plot_files_output = 1
+amr.plot_file = plt
+amr.plot_per  = 1.0e-5
+amr.plot_vars        = density Temp
+amr.derive_plot_vars = x_velocity y_velocity z_velocity magvel magvort pressure MachNumber soundspeed
+pelec.plot_massfrac = 1
+pelec.plot_rhoy     = 0
+
+# ------------------------------------------------------- problem parameters --
+prob.p_in   = 1.01325e6
+prob.T_in   = 1000.0
+prob.u_in   = 9.30e4
+prob.YO2_in = 0.23
+prob.YN2_in = 0.77
+
+prob.p_jet  = 1.30709e6
+prob.T_jet  = 300.0
+prob.v_jet  = 1.321e5
+prob.jet_x  = 4.2
+prob.jet_z  = 0.25
+prob.jet_d  = 0.1
+prob.jet_start = 0.0
+prob.jet_ramp  = 0.0
+
+eb2.geom_type = "all_regular"

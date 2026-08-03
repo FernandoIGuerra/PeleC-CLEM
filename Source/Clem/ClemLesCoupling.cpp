@@ -115,7 +115,6 @@ LesCoupling::renormalizeEnsembleVolume(ClemManager& mgr, const int lev)
   }
 
   amrex::Real max_defect = 0.0;
-
   for (ClemParIter pti(pc, lev); pti.isValid(); ++pti) {
     const int grid_id    = pti.index();
     const amrex::Box& bx = pti.validbox();

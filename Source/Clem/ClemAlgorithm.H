@@ -5,6 +5,7 @@
 #include "ClemManager.H"
 #include "ClemReaction.H"
 #include "ClemSplicing.H"
+#include "ClemStirring.H"
 
 namespace clem {
 
@@ -24,7 +25,11 @@ namespace clem {
 //      independent full-dt stages. If diffusion is off, Delta t_diff
 //      degenerates to the full LES dt and reaction alone runs once
 //      (ReactionOperator::react).
-//   6. (stirring: inserted here when implemented)
+//   6. STIRRING (clem.do_stir) - NOT a stage of its own. A triplet map is an
+//      instantaneous rearrangement, so it rides INSIDE the 4-5 sub-cycle as a
+//      third clip on Delta t_diff: the (nu_t, |S|) field is built here, once
+//      per step, from the resolved LES state, and the per-line clock lives in
+//      DiffusionOperator::diffuse. See the STIRRING block there.
 //   7. SplicingOperator - inter-cell transport with the LES mass fluxes
 //   8. LesCoupling::writeBackToLes - SGS->LES filtered (rho Y_k, rho e)
 //
@@ -53,7 +58,9 @@ public:
   // pressure drives the isentropic stage; its composition/energy are
   // overwritten by the write-back when clem.couple_back is on); nstep drives
   // the periodic particle dumps; tparm is PeleC's HOST transport-parameter
-  // block, needed by the diffusion stage
+  // block, needed by the diffusion stage; les is a read-only view of the LES
+  // model PeleC is actually running, and is what makes the stirring rate a
+  // property of the resolved field rather than a prescribed number
   static StepDiagnostics advance(
     ClemManager& mgr,
     int lev,
@@ -69,7 +76,8 @@ public:
     int spec_indx,
     amrex::Real flux_scale,
     int nstep,
-    const TransParmType* tparm);
+    const TransParmType* tparm,
+    const LesView& les = LesView{});
 };
 
 } // namespace clem

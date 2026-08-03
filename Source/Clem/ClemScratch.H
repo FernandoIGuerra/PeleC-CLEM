@@ -3,9 +3,21 @@
 
 #include <AMReX_Vector.H>
 
+#include "PelePhysics.H"
+
 #include "ClemIndex.H"
 
 namespace clem {
+
+// Fernando-Clem: the transport-coefficient block. PeleC owns it (PeleC::
+// trans_parms); the host copy is passed in as an argument so the Clem module
+// keeps its one-way dependency on PeleC (PeleC includes Clem, never the
+// reverse) and stays free of prob.H. It lives here, beside the line arena,
+// because every operator that evaluates transport on a gathered line needs
+// both together - diffusion for (rho lambda, rho D_k), stirring for nu = mu/rho
+using TransParmType = pele::physics::transport::TransParm<
+  pele::physics::PhysicsType::eos_type,
+  pele::physics::PhysicsType::transport_type>;
 
 // Fernando-Clem: per-rank reusable scratch arena for the LEM line operators.
 //

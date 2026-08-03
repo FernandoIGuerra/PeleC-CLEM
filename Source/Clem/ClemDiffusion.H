@@ -9,13 +9,10 @@
 
 namespace clem {
 
-// Fernando-Clem: the transport-coefficient block. PeleC owns it (PeleC::
-// trans_parms); the host copy is passed in as an argument so the Clem module
-// keeps its one-way dependency on PeleC (PeleC includes Clem, never the
-// reverse) and stays free of prob.H
-using TransParmType = pele::physics::transport::TransParm<
-  pele::physics::PhysicsType::eos_type,
-  pele::physics::PhysicsType::transport_type>;
+// Fernando-Clem: TransParmType now lives in ClemScratch.H, next to the line
+// arena it is always used with - the stirring closure needs it too (it forms
+// the line's molecular nu), and it must not have to include this header to
+// get it
 
 // Fernando-Clem: molecular diffusion of species and TEMPERATURE along the LEM
 // line (module of the ClemAlgorithm composition; see
@@ -148,6 +145,22 @@ public:
     // construction), so sum(m h) should be invariant across diffusion AND
     // reaction alike, and this number validates BOTH.
     amrex::Real drift_enthalpy = 0.0;
+
+    // Fernando-Clem: stirring (clem.do_stir), counted over the whole level.
+    // total_stir_events is the number of triplet maps actually APPLIED;
+    // max_stir_events is the worst single line
+    amrex::Long total_stir_events = 0;
+    int max_stir_events = 0;
+    // Fernando-Clem: eddies that were DRAWN (so the clock advanced) but could
+    // not be mapped because they spanned fewer than 6 elements. f(l) ~ l^-8/3
+    // piles up just above eta, so this is large whenever n_lem < ~6 Delta/eta
+    // - and when it is, the realised D_T is far below the target. It is the
+    // number that says whether the stage is doing anything
+    amrex::Long n_stir_rejected = 0;
+    // Fernando-Clem: lines whose stirring sequence was cut short because the
+    // substep cap (clem.diffusion_max_substeps) forced the sub-cycle to jump
+    // to the end of dt with epochs still pending
+    amrex::Long n_stir_truncated = 0;
   };
 
   // Fernando-Clem: advance every line on the level by dt. tparm is the HOST
@@ -157,12 +170,20 @@ public:
   // call ReactionOperator::reactSubstep after every advanceLine, on the same
   // dt_sub - diffusion and reaction co-stepped over the diffusion-CFL substep
   // (Maxwell [M §3.3.3] steps 14-20), not two independent full-dt stages.
+  //
+  // nut_strain/filter_width turn STIRRING on (clem.do_stir): the (nu_t, |S|)
+  // field built once per step by clem::computeTurbViscosity, and Delta from
+  // clem::filterWidth. The sub-cycle then also carries the stirring clock - see
+  // the STIRRING block in diffuse(). nullptr/0 leaves the loop exactly as it
+  // was, so a non-stirring run is bit-for-bit unchanged
   static Diagnostics diffuse(
     ClemManager& mgr,
     int lev,
     amrex::Real dt,
     const TransParmType* tparm,
-    ReactionOperator::Diagnostics* react_diag = nullptr);
+    ReactionOperator::Diagnostics* react_diag = nullptr,
+    const amrex::MultiFab* nut_strain = nullptr,
+    amrex::Real filter_width = 0.0);
 
 private:
   // Fernando-Clem: copy one cell's elements into the arena in line order
@@ -194,6 +215,24 @@ private:
 
   // Fernando-Clem: T += dt dTdt, Y += dt dYdt, then (rho, e) from PYT2RE(p, T, Y)
   static void advanceLine(LineScratch& lscr, amrex::Real dt_sub, Diagnostics& diag);
+
+  // Fernando-Clem: THE REARRANGEMENT OPERATOR - one triplet map over the n_seg
+  // elements starting at line position `start` (the segment wraps: the line is
+  // periodic). ClemStirring says WHEN, HOW BIG and WHERE; this is the map
+  // itself.
+  //
+  // The map lays down three compressed copies of the segment, the middle one
+  // reversed, which on an equal-spaced discrete line is exactly the PERMUTATION
+  // that takes the elements at offsets 0,3,6,... then 1,4,7,... reversed, then
+  // 2,5,8,... For n_seg = 6 that is [0,3,4,1,2,5]. Being a permutation is what
+  // makes stirring conservative here: the regrid leaves the line equal-mass, so
+  // permuting (rho, T, e, p, Y_k) between elements moves fluid WITHOUT moving
+  // mass, and the multiset of element states is preserved exactly. sum(m),
+  // sum(m Y_k) and sum(m e) therefore change only by the round-off of
+  // re-summing the same values in a different order (~1e-16 relative) - the map
+  // itself contributes no conservation error at all, unlike diffusion's
+  // non-conservative T-transport. n_seg: positive multiple of 3, <= n_elem
+  static void tripletMap(LineScratch& lscr, int start, int n_seg);
 };
 
 } // namespace clem

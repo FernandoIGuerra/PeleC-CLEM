@@ -26,6 +26,8 @@ $$
 
 These correspond to temperature, the vector of species mass fractions $\mathbf{Y}_p = (Y_{p,1}, \dots, Y_{p,N_s})$, mass, volume and pressure. Density is implicit given by mass and volume.
 
+Each CLEM line is an ensemble of Lagrangian particles tied to a grid cell by position and ownership.
+
 ## LES Time integration
 
 The present implementation targets exclusively PeleC's Method of Lines path (`do_mol = 1`) with a single iteration (`mol_iters = 1`); the Godunov path and the SDC-type iteration are out of scope. First the LES cell is computed following a second order Method of Lines integration (Heun integration):
@@ -262,4 +264,86 @@ The Zero-Mach equation are solved using a $\Delta m$ equal for all particles.
 2. The regridding peprator $\mathcal{O}_{regrid}$ is applied in each LEM domain such as $\Delta m$ is uniform in every particle within the LEM domain
 3. The zero-Mach equation are solved in a smaller time step, $\Delta t_{CLEM}$ such as the stabiltiy of the diffusion and the stirring are full filled.
 
-## CLEM Comunication
+## CLEM Communication to LES
+
+The coupling-back operator returns the sub-grid's effect on to the super-grid state $U$ $(\rho \mathbf{Y}, \rho e)$. Two ensemble averages of a particle field $\phi_p$ over $\mathcal{E}_c$ are used: the Favre (mass-weighted) mean, and its conserved (density) form,
+
+$$
+\overline{\phi}_c = \frac{\sum_{p \in \mathcal{E}_c} m_p \phi_p}{\sum_{p \in \mathcal{E}_c} m_p}, \qquad
+[\rho \phi]_c = \frac{\sum_{p \in \mathcal{E}_c} m_p \phi_p}{V_c}
+$$
+
+with $V_c = \Delta_x^{DIM}$ the LES cell volume. Two couple back the CLEM, the following strategy is designed enforcing that the CLEM is the only mechanism responsable for the scalar transport, i.e, the $\bar{\rho} \tilde{Y}_k$, That is, during the RK2 integration, prediction and correction, the scalar are frozen.
+CLEM owns $\rho \mathbf{Y}$ transport entirely. Then, the scalar update and coupling is defined as follows:
+
+$$
+\Delta[\rho Y_k]_c = [\rho Y_k]_c^{post\text{-}splice} - [\rho Y_k]_c^{pre}, \qquad
+(\rho Y_k)_c^{n+1} = (\rho Y_k)_c^{n} + \Delta[\rho Y_k]_c
+$$
+
+then **projected** onto the LES density, $(\rho Y_k)_c^{n+1} \leftarrow (\rho Y_k)_c^{n+1} \, \rho_c^{n+1} / \sum_j (\rho Y_j)_c^{n+1}$, so the denisty solved in the LES cell, $\sum_k \rho Y_k = \rho_{LES}$, holds exactly regardless of splice/regrid round-off. The energy channel is treated the same way, $\Delta[\rho e]_c$ added to $(\rho e)_c^n$, with $\rho E^{n+1}$ rebuilt from the LES kinetic energy. The energy update is required because of the volumen normalization, $\mathcal{O}_{vol}$ (which isentropically rescales the line back to $V_c$), so the line's $p\,dV$ breathing work is captured in $\Delta[\rho e]_c$ instead of being lost to the fixed-volume LES cell.
+
+This strategy leaves $\rho$ and $\rho \mathbf{u}$ untouched, only $\rho \mathbf{Y}$ and, $\rho e$ are written back. This is consistent with the LES formualtion, owning mass and momentum exclusively.
+
+The volume renormalization $\mathcal{O}_{vol}$ si required due to the isobaric coupling, which leads to a cell colume drift after the CLEM operations. Accordignly, immediately before the conserved snapshot, every particle is rescaled by the same isentropic ratio $f = V_c / \sum_{p \in \mathcal{E}_c} v_p$:
+
+$$
+\rho_p \to \rho_p / f, \qquad T_p \to T_p f^{-(\gamma_p - 1)}, \qquad P_p \to P_p f^{-\gamma_p}, \qquad
+e_p \mathrel{+}= e(\rho_p/f, T_p f^{-(\gamma_p-1)}, \mathbf{Y}_p) - e(\rho_p, T_p, \mathbf{Y}_p)
+$$
+
+so that $\sum_p v_p \to V_c$ exactly. This turns the line's $p\,dV$ breathing work back into internal energy rather than losing it to the LES's fixed-volume cell, and is what the energy channel of the conserved-delta write-back above ultimately captures.
+
+Overall, the strategy summarizes as follows,
+
+$$
+U^{n+1,\star } = U^n + \Delta t \Psi_{LES}
+$$
+
+where the mass species are kept frozen, and only denisty, momemtum and total energy are uodated here. Later, we apply the CLEM strategy to account for the reaction and the transport of scalars
+
+$$
+U^{n+1} =  U^{n+1,\star } + \Delta t \Psi_{CLEM}
+$$
+Here the compressibility effect, reaction and scalar trasnport are accounter for following the strategy described above. 
+
+## Stirring Process
+
+The triple map process mimics the turn over effect of an small scale vortice not accounted in tradicional combustion models. Eddy diffusivity $D_T$ in fact parametrized the turbulent transport by an small scale eddy. Then, this can be approximated via
+
+$$
+D_T = \frac{2}{27}\Lambda \int_\eta^{\bar{\Delta}} l^3f(l)dl
+$$
+
+where $f(l)$ is a probabiltiy denisty function such as,
+
+$$
+f(l) = \frac{(5/3) l^{-8/3}}{\eta^{-5/3} - \bar{\Delta}^{-5/3}}
+$$
+
+where $\eta$ is the Kolgomorov scale and $\bar{\Delta}$ is the filter size. In the current implementation, an explicit filter approach is used. Then, $\bar{\Delta}$ is the cell size. The turbulent diffusivity is
+
+$$
+D_T = \frac{\nu_t }{Sc_t}
+$$
+It is possible to set $Sc_t = 1$; then if the strain rate tensor is defined
+
+$$
+\bar{S}_{ij} = \frac{1}{2} \left( \frac{\partial \bar{u}_i}{\partial x_j} + \frac{\partial \bar{u}_j}{\partial x_i} \right)
+$$
+
+$$
+|\bar{S}| = \sqrt{2 \bar{S}_{ij} \bar{S}_{ij}} \quad \Delta = (\Delta x \Delta y \Delta z)^{1/3}
+$$
+
+$$ 
+\nu_{sgs} = (C_s \Delta)^2 |\bar{S}| \quad k_{sgs} = \left( \frac{\nu_{sgs}}{C_k \Delta} \right)^2 \quad k_{sgs} = \left( \frac{C_s^2}{C_k} \Delta |\bar{S}| \right)^2
+$$
+
+form $k_{sgs}$ the $u'$ is computed adn the $\eta$ the kolgomorov scales is given as 
+
+$$
+\eta = \left( \frac{\nu^3}{(C_s \Delta)^2 |\bar{S}|^3} \right)^{1/4}
+$$
+
+Then we have all information to compute the relevant characteristics
