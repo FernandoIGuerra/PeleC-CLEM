@@ -100,9 +100,34 @@ is_outside_domain_on_outflow(
   return false;
 }
 
+// Fernando-Clem: does this boundary code PRESCRIBE the ghost state, so that the
+// splice can build an incoming parcel from it? (PCPhysBCType encoding:
+// inflow == 1, user_bc == 6.)
+//
+// Both must be accepted, and the reason is not a convenience: Setup.cpp maps
+// inflow and user_bc to the SAME amrex::BCType::ext_dir in scalar_bc,
+// norm_vel_bc and tang_vel_bc alike, and BCfill.cpp calls bcnormal for
+// ext_dir either way. The two codes are therefore indistinguishable to PeleC -
+// "UserBC" is just "Hard" whose ghost state the problem writes itself. Testing
+// only for 1 silently dropped every gram entering through a "UserBC" inlet:
+// the LES saw its inflow, the subgrid did not, the line drained against a
+// live outflow and the isentropic volume renormalization cooled it into a NaN.
+//
+// Accepting user_bc costs nothing at a face that is really a wall, because the
+// caller only injects when the LES face mass flux is strictly positive - a
+// no-slip wall carries none. That is what lets one bcnormal face be a wall
+// almost everywhere and an injector over a small hole, as in a jet in
+// crossflow.
+AMREX_FORCE_INLINE
+bool
+prescribes_ghost_state(const int bc_code)
+{
+  return (bc_code == 1) || (bc_code == 6);
+}
+
 // Fernando-Clem: crossing this face enters the domain through a non-periodic
-// inflow boundary (PCPhysBCType encoding: inflow == 1); dst is the would-be
-// destination (outside the domain for a boundary face)
+// boundary whose ghost state is prescribed; dst is the would-be destination
+// (outside the domain for a boundary face)
 AMREX_FORCE_INLINE
 bool
 is_inflow_boundary_face(
@@ -116,10 +141,10 @@ is_inflow_boundary_face(
     if (is_periodic[dir] != 0) {
       continue;
     }
-    if (dst[dir] < domain.smallEnd(dir) && lo_bc[dir] == 1) {
+    if (dst[dir] < domain.smallEnd(dir) && prescribes_ghost_state(lo_bc[dir])) {
       return true;
     }
-    if (dst[dir] > domain.bigEnd(dir) && hi_bc[dir] == 1) {
+    if (dst[dir] > domain.bigEnd(dir) && prescribes_ghost_state(hi_bc[dir])) {
       return true;
     }
   }

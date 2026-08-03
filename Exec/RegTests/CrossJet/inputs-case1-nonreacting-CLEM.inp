@@ -29,27 +29,48 @@
 #    capture and the clemAdvance hook live in the MOL path only and initClem
 #    aborts otherwise.
 #
+# 4. pelec.Cs = 0.16 is added (the paper runs no subgrid model at all). It is
+#    what feeds nu_t to the CLEM stirring closure. See the physics block for
+#    why pelec.do_les nevertheless stays 0 -- it is a hard limitation of
+#    PeleC's LES term with a 13-species mechanism, not a choice.
+#
 # ---------------------------------------------------------------------------
 # WHAT CLEM ACTUALLY DOES IN THIS RUN -- READ THIS BEFORE INTERPRETING RESULTS
 # ---------------------------------------------------------------------------
-# With freeze_species = 0 and no subgrid reaction, CLEM is DYNAMICALLY A NO-OP
-# on the LES, by construction and not by mistake.  The write-back feeds back
-# only the increment the subgrid PROCESSES (diffusion + reaction) make to the
-# per-cell filtered mean; the LEM line is periodic per cell, so subgrid
-# diffusion conserves that mean exactly and reaction is off.  The increment is
-# therefore ~0 and the resolved field stays bit-comparable to plain PeleC.
+# Stirring and diffusion are ON, reaction is OFF. The subgrid is doing real
+# work -- triplet maps are folding the line and molecular diffusion is mixing
+# it, which is the whole point of LEM -- but with freeze_species = 0 the LES
+# WILL NOT SEE ANY OF IT. That is structural, not a setup mistake:
 #
-# What IS exercised, and what this run is for:
+#   - a triplet map is a measure-preserving REARRANGEMENT of the equal-mass
+#     elements, so it leaves the per-cell filtered mean sum(mY)/sum(m) exactly
+#     unchanged;
+#   - the LEM line is periodic per cell, so diffusion telescopes around the
+#     ring and also conserves that mean exactly;
+#   - the write-back feeds back only the increment measured between the
+#     snapshot after the regrid and the snapshot before the splice, i.e. the
+#     PROCESS increment with transport deliberately excluded.
+#
+# Reaction is the one process that changes the filtered mean. With it off, the
+# increment is ~0 (~1e-15/step of FP leakage) and the resolved field stays
+# bit-comparable to plain PeleC.
+#
+# THE ONE SWITCH THAT CHANGES THIS is clem.freeze_species = 1: then the LES
+# stops advecting rho*Y_k, the write-back brackets the SPLICE as well, and the
+# stirred/diffused line owns species transport outright -- so stirring does
+# reach the resolved field. Read the warning at that knob before flipping it.
+#
+# What this run therefore is: a 3D machinery, stability and cost case, and the
+# first exercise of the stirring closure on a real turbulent field. What is
+# exercised:
+#   - nu_t, |S|, eta and the eddy PDF built from the resolved LES field, and
+#     whether an inertial range even exists at dx = 0.3125 mm
+#   - triplet maps inside the diffusion sub-cycle, in 3D, at 307,200 lines
 #   - isentropic LES -> SGS pressure update under a bow shock and a barrel shock
 #   - regrid (equal-mass line restoration, sliver merging) in 3D
 #   - splice transport driven by 3D face mass fluxes, including a strongly
 #     sheared, non-grid-aligned jet -- the hardest case for the operator
 #   - ensemble-volume renormalization and the conservation diagnostics
-#   - stability and cost of the whole chain at 307,200 cells x 12 elements
-#
-# CLEM stops being a no-op only through REACTION.  Switch to the reacting case
-# for that.  To instead hand species TRANSPORT to the subgrid, set
-# clem.freeze_species = 1 -- but see the warning in the CLEM block below.
 #
 # KNOWN FIDELITY GAP IN THIS FLOW: Maxwell's Rankine-Hugoniot shock branch
 # (baseline contract items B3/B4) is NOT implemented.  The subgrid pressure
@@ -89,8 +110,30 @@ pelec.diffuse_temp = 1
 pelec.diffuse_spec = 1        # LES owns resolved diffusion (freeze_species=0)
 pelec.diffuse_enth = 1
 pelec.do_react     = 0
-pelec.do_les       = 0        # no subgrid stress model, as in the paper
 pelec.chem_integrator = "ReactorNull"
+
+# CLASSICAL SMAGORINSKY, for the CLEM stirring closure.
+#
+# pelec.do_les MUST stay 0 here. It is not a modelling choice: PeleC::init_les
+# aborts with "LES is not supported for multi-component systems" whenever
+# NUM_SPECIES > 2 (PeleC.cpp:2289-2293), and BurkeDryer has 13. Turning it on
+# kills the run at setup.
+#
+# That does NOT disable Smagorinsky for CLEM. pelec.Cs is parsed
+# unconditionally (pelec_queries.H:81, outside the do_les block), and
+# PeleC::clemAdvance pins the model CLEM sees to 0 = constant-coefficient
+# Smagorinsky when pelec.do_les = 0. CLEM's stirring closure then forms
+#   nu_t = Cs^2 Delta^2 |S|
+# itself, from the resolved velocity gradients, and never calls PeleC's LES
+# term. See the reasoning in ClemStirring.cpp:44-56 -- this split is deliberate,
+# precisely so do_stir stays usable with a real mechanism.
+#
+# What is therefore MISSING is only PeleC's resolved subgrid STRESS/flux term:
+# the momentum equation gets no eddy viscosity. The subgrid SCALAR closure
+# (CLEM) is fully active. Keep that asymmetry in mind when reading results.
+pelec.do_les       = 0
+pelec.Cs           = 0.16     # classical Smagorinsky constant; MUST be > 0 or
+                              # clem.do_stir aborts (nu_t == 0 => no eddy ever)
 
 # ------------------------------------------------------------- time stepping -
 pelec.cfl         = 0.1       # paper's CFL
@@ -139,20 +182,23 @@ clem.regrid_int         = 1
 
 clem.do_react = 0             # non-reacting case
 
-# Subgrid line diffusion. Structurally INERT to the LES here (the periodic line
-# conserves the cell mean and reaction is off), so it is pure cost in this run
-# -- keep it on to exercise and time the operator in 3D, set to 0 for a faster
-# bit-identical run.  It is also the carrier of the stirring clock: clem.do_stir
-# requires clem.do_diffusion = 1.
+# Subgrid line diffusion. Required by stirring: the triplet map is not a stage
+# of its own, it rides inside the diffusion sub-cycle as a third clip on
+# Delta t_diff, so the stirring clock only ticks while diffusion sub-steps
+# (ClemStirring.cpp:24-29 aborts on do_stir = 1 with do_diffusion = 0).
 clem.do_diffusion           = 1
 clem.diffusion_cfl          = 0.5
 clem.diffusion_max_substeps = 1000
 
-# Stirring is OFF because it needs an eddy viscosity and this case runs with
-# pelec.do_les = 0.  To enable: clem.do_stir = 1 AND give it a nu_t source,
-# i.e. pelec.Cs > 0 (CLEM falls back to constant-coefficient Smagorinsky when
-# pelec.do_les = 0; it aborts if Cs <= 0).  That is a deviation from the paper.
-clem.do_stir = 0
+# Turbulent stirring: the eddy event rate, size and location are all derived
+# from the resolved field -- nothing is prescribed. With pelec.Cs = 0.16 above:
+#   D_T = nu_t, epsilon = nu_t |S|^2, eta = (nu^3/epsilon)^(1/4),
+#   Lambda = 27 D_T / (2 I(eta,Delta)), dt_stir = 1/(Lambda Delta)
+# over the inertial-range eddy PDF f(l) ~ l^(-8/3) on eta <= l <= Delta.
+# Watch it in the clem.verbose = 1 output: if no map ever fires, eta has
+# collapsed onto Delta (no inertial range resolved at dx = 0.3125 mm) rather
+# than the closure being broken.
+clem.do_stir = 1
 
 # Particle plotfiles (plt_clem_*/particles). Expensive in 3D: 3.69M elements.
 clem.plot_int = 0
