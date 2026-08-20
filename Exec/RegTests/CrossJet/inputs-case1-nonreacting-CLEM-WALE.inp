@@ -1,0 +1,159 @@
+# ============================================================================
+# H2 jet in supersonic crossflow -- Jin et al., Combust. Flame 268 (2024) 113627
+# Case 1, NON-REACTING.  CLEM (Maxwell chain) + WALE.
+#
+#   mpirun -np 38 ./PeleC3d.gnu.MPI.ex \
+#       inputs-case1-nonreacting-CLEM-WALE.inp 2>&1 | tee run-nrW.log
+#
+# TEE THE LOG. The per-step stirring counters are on stdout only (they are not
+# written to datlog), and they are the point of this sweep. Runs 01-03 were
+# launched without a log and their stirring history is gone for good.
+#
+# ---------------------------------------------------------------------------
+# ONE OF THREE. The three files differ ONLY in the block marked SGS CLOSURE:
+#
+#   ...-smagorinsky.inp   do_les=1  les_model=0  do_wall_model=0
+#   ...-WALE.inp          do_les=1  les_model=2  do_wall_model=0
+#   ...-WALE-WM.inp       do_les=1  les_model=2  do_wall_model=1
+#
+# Everything else - grid, BCs, CLEM block, PrT, output cadence, stop_time - is
+# byte-identical, so any difference between the runs is the closure and only
+# the closure. In particular PrT = 1e6 in ALL THREE: run 02 used the default
+# PrT = 1.0 and therefore carried an SGS heat flux the WALE runs did not, which
+# confounded that comparison. Do not "fix" PrT back to 1.0 in one file alone.
+#
+# NO WALL MODEL WITH SMAGORINSKY - this is deliberate, not an oversight. The
+# wall model rescales the DIFFUSION flux (Diffusion.cpp:330) while the
+# Smagorinsky stress is a separate source term (les_src, LES.cpp:98). They add,
+# so switching both on counts the wall stress twice. With WALE this is harmless
+# because nu_t -> 0 at the wall; with Cs = 0.16 undamped it is not.
+# ---------------------------------------------------------------------------
+
+max_step  = 100000000
+stop_time = 4.0e-4           # 0.4 ms, ~3 flow-through times (12.5 cm / 930 m/s)
+
+# ---------------------------------------------------------------- geometry --
+# CGS. 125 x 15 x 5 mm combustor, spanwise-periodic.
+geometry.is_periodic = 0 0 1
+geometry.coord_sys   = 0
+geometry.prob_lo     = 0.0   0.0  0.0
+geometry.prob_hi     = 12.5  1.5  0.5
+
+amr.n_cell           = 400 48 16       # dx = dy = dz = 0.3125 mm
+
+# --------------------------------------------------------------------- BCs --
+# xlo : supersonic vitiated-air inflow            (bcnormal)
+# ylo : adiabatic no-slip wall + H2 injector hole (bcnormal)
+# yhi : adiabatic no-slip wall
+# xhi : supersonic outflow (first-order extrapolation)
+# z   : periodic
+pelec.lo_bc = "UserBC"  "UserBC"      "Interior"
+pelec.hi_bc = "FOExtrap" "NoSlipWall"  "Interior"
+
+# ----------------------------------------------------------------- physics --
+pelec.do_hydro     = 1
+pelec.do_mol       = 1        # REQUIRED by CLEM
+pelec.mol_iorder   = 2
+pelec.diffuse_vel  = 1
+pelec.diffuse_temp = 1
+pelec.diffuse_spec = 1
+pelec.diffuse_enth = 1
+pelec.do_react     = 0
+pelec.chem_integrator = "ReactorNull"
+
+# ------------------------------------------------------ SGS CLOSURE (VARIES) -
+pelec.do_les       = 1
+pelec.les_model    = 2        # 2 = WALE (Nicoud & Ducros)
+pelec.Cs           = 0.16     # inert here; kept so the three files match
+pelec.Cw           = 0.325    # WALE constant; also feeds CLEM stirring
+pelec.PrT          = 1.0e6    # ~kills the SGS heat flux; CLEM owns scalars
+pelec.do_wall_model = 0       # OFF: this run is the control that isolates the WM
+# -----------------------------------------------------------------------------
+
+# ------------------------------------------------------------- time stepping -
+pelec.cfl         = 0.1
+pelec.init_shrink = 0.1
+pelec.change_max  = 1.05
+pelec.dt_cutoff   = 1.e-14
+
+# ----------------------------------------------------------------- verbosity -
+pelec.v            = 1
+amr.v              = 1
+pelec.sum_interval = 10
+amr.data_log       = datlog_nrW
+
+# -------------------------------------------------------------------- AMR ---
+# Single level: CLEM only runs on level 0 (Advance.cpp:77).
+amr.max_level       = 0
+amr.blocking_factor = 16
+amr.max_grid_size   = 16      # 400/16 x 48/16 x 16/16 = 25 x 3 x 1 = 75 grids.
+                              # With 32 the domain yields only ~26 grids, so any
+                              # rank count above 26 leaves ranks idle. 75 grids
+                              # load-balances well onto 25 or 38 ranks.
+
+# --------------------------------------------------------------------- CLEM -
+# THE MAXWELL CHAIN, unchanged from the reacting runs except do_react. Stage
+# numbering is the composition documented in ClemAlgorithm.H:14-32.
+clem.verbose = 1              # <- prints the per-step stirring counters
+
+clem.pressure_coupling  = 1   # stage 2, LES->SGS isentropic work on each p_k
+clem.regrid_int         = 1   # stage 3, equal-mass elements every step (MANDATORY)
+
+# stages 4-5, co-stepped. do_react = 0 here, so this is diffusion alone.
+clem.do_diffusion           = 1
+clem.do_react               = 0      # <- NON-REACTING
+clem.diffusion_cfl          = 0.5
+clem.diffusion_max_substeps = 1000
+
+# stage 6 - stirring. nu_t comes from the ACTIVE LES model, so WALE here.
+# Counting these events across the three closures is the purpose of this sweep:
+#   "CLEM stirring: maps applied = N over 307200 lines (max = K/line),
+#    eddies rejected as too small = R (P% of those drawn), ..."
+# In run 04 (WALE, reacting) P was 99.685% over 77405 steps: eddies ARE drawn
+# (~1200/step) but almost none span the 6 elements a triplet map needs, because
+# f(l) ~ l^-8/3 piles up just above eta and CLEM_NLEM is only 12
+# (ClemStirring.H:229). Watch whether P is closure-dependent or ~constant - if
+# constant, NLEM is the binding constraint, not the closure.
+clem.do_stir = 1
+
+clem.freeze_species     = 1   # stage 8, Maxwell conserved-delta + projection
+clem.couple_back        = 1
+clem.couple_back_energy = 1
+clem.vol_renorm         = 1
+
+clem.plot_int = 0             # particle plotfiles off (3.69M elements in 3D)
+
+# Compile-time (GNUmakefile): CLEM_MODEL = TRUE, CLEM_NLEM = 12,
+# CLEM_SPLICE_POLICY defaults to 0 = side_aware = Maxwell steps 23-24.
+
+# ------------------------------------------------------------------ output --
+amr.checkpoint_files_output = 1
+amr.check_file = ResultsNonReact/CLEM-WALE/chk_nrW
+amr.check_per  = 5.0e-5
+
+amr.plot_files_output = 1
+amr.plot_file = ResultsNonReact/CLEM-WALE/plt_nrW
+amr.plot_per  = 1.0e-5
+amr.plot_vars        = density Temp
+amr.derive_plot_vars = x_velocity y_velocity z_velocity magvel magvort pressure MachNumber soundspeed
+pelec.plot_massfrac = 1
+pelec.plot_rhoy     = 0
+
+# ------------------------------------------------------- problem parameters --
+# Table 1 of the paper, Case 1. CGS: 1 atm = 1.01325e6 dyn/cm^2.
+prob.p_in   = 1.01325e6      # 1 atm
+prob.T_in   = 1000.0         # K
+prob.u_in   = 9.30e4         # 930 m/s -> M = 1.5
+prob.YO2_in = 0.23
+prob.YN2_in = 0.77
+
+prob.p_jet  = 1.30709e6      # 1.29 atm
+prob.T_jet  = 300.0          # K
+prob.v_jet  = 1.321e5        # 1321 m/s -> M ~ 1.0
+prob.jet_x  = 4.2            # 42 mm from the inlet
+prob.jet_z  = 0.25           # spanwise centre
+prob.jet_d  = 0.1            # 1 mm diameter
+prob.jet_start = 0.0
+prob.jet_ramp  = 1.0e-5
+
+eb2.geom_type = "all_regular"

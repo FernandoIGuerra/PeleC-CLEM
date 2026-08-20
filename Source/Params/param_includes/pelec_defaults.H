@@ -60,6 +60,13 @@ amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> PeleC::domlo_isothermal_temp = {
   -1.0};
 amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> PeleC::domhi_isothermal_temp = {
   -1.0};
+// Fernando-Clem: equilibrium wall-stress model (see WallModel.H). Off by
+// default; kappa/B are the standard log-law constants used by Spalding.
+bool PeleC::do_wall_model = false;
+amrex::GpuArray<int, AMREX_SPACEDIM> PeleC::wall_model_lo = {0};
+amrex::GpuArray<int, AMREX_SPACEDIM> PeleC::wall_model_hi = {0};
+amrex::Real PeleC::wall_model_kappa = 0.41;
+amrex::Real PeleC::wall_model_B = 5.2;
 bool PeleC::do_les = false;
 bool PeleC::use_explicit_filter = false;
 amrex::Real PeleC::Cs = 0.0;

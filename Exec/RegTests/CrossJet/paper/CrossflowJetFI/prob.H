@@ -117,39 +117,6 @@ bcnormal(
 
 void pc_prob_close();
 
-// The ylo boundary is a wall everywhere EXCEPT the injector hole, where the
-// jet issues and no wall law applies. Everything else keeps the default.
-struct CrossJetProblemSpecificFunctions : public DefaultProblemSpecificFunctions
-{
-  AMREX_GPU_DEVICE
-  AMREX_FORCE_INLINE
-  static bool wall_model_active(
-    const amrex::IntVect& iv,
-    const int dir,
-    const int normal,
-    amrex::GeometryData const& geomdata,
-    ProbParmDevice const& prob_parm)
-  {
-    // Only the ylo boundary is pierced; yhi is a plain wall.
-    if ((dir != 1) || (normal != -1)) {
-      return true;
-    }
-    const amrex::Real* problo = geomdata.ProbLo();
-    const amrex::Real* dx = geomdata.CellSize();
-    const amrex::Real xc = problo[0] + (iv[0] + 0.5) * dx[0];
-    const amrex::Real dxj = xc - prob_parm.jet_x;
-#if AMREX_SPACEDIM == 3
-    const amrex::Real zc = problo[2] + (iv[2] + 0.5) * dx[2];
-    const amrex::Real dzj = zc - prob_parm.jet_z;
-    const amrex::Real r2 = dxj * dxj + dzj * dzj;
-#else
-    const amrex::Real r2 = dxj * dxj;
-#endif
-    const amrex::Real rj = 0.5 * prob_parm.jet_d;
-    return r2 >= rj * rj;
-  }
-};
-
-using ProblemSpecificFunctions = CrossJetProblemSpecificFunctions;
+using ProblemSpecificFunctions = DefaultProblemSpecificFunctions;
 
 #endif

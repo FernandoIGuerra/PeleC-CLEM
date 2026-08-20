@@ -98,6 +98,24 @@ struct DefaultProblemSpecificFunctions
     Twall(i, j, k) = Twall_in;
   }
 
+  // Fernando-Clem: is the wall-stress model (pelec.do_wall_model) active on
+  // this domain-boundary face? Default: yes, wherever the model is switched on
+  // for that face. A case overrides this to carve out the parts of the
+  // boundary that are NOT a wall - e.g. the CrossJet injector hole punched
+  // through the ylo wall, where the jet issues and no wall law applies.
+  // iv is the FIRST INTERIOR cell adjacent to the face.
+  AMREX_GPU_DEVICE
+  AMREX_FORCE_INLINE
+  static bool wall_model_active(
+    const amrex::IntVect& /*iv*/,
+    const int /*dir*/,
+    const int /*normal*/,
+    amrex::GeometryData const& /*geomdata*/,
+    ProbParmDevice const& /*prob_parm*/)
+  {
+    return true;
+  }
+
   AMREX_GPU_DEVICE
   AMREX_FORCE_INLINE
   static bool problem_eb_state(

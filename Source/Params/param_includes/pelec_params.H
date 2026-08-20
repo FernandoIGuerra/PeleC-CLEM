@@ -58,6 +58,12 @@ static bool transport_harmonic_mean;
 static bool do_isothermal_walls;
 static amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> domlo_isothermal_temp;
 static amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> domhi_isothermal_temp;
+// Fernando-Clem: equilibrium wall-stress model (see WallModel.H)
+static bool do_wall_model;
+static amrex::GpuArray<int, AMREX_SPACEDIM> wall_model_lo;
+static amrex::GpuArray<int, AMREX_SPACEDIM> wall_model_hi;
+static amrex::Real wall_model_kappa;
+static amrex::Real wall_model_B;
 static bool do_les;
 static bool use_explicit_filter;
 static amrex::Real Cs;

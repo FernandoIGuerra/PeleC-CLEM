@@ -1,5 +1,5 @@
 max_step  = 100000000
-stop_time = 4.0e-4          # 0.4 ms, ~3 flow-through times
+stop_time = 10.0e-4          # 0.4 ms, ~3 flow-through times
 
 # ---------------------------------------------------------------- geometry --
 # CGS. 125 x 15 x 5 mm combustor, spanwise-periodic.
@@ -31,7 +31,7 @@ pelec.do_react     = 0
 pelec.chem_integrator = "ReactorNull"
 
 
-pelec.do_les       = 0
+pelec.do_les       = 1
 pelec.Cs           = 0.16     # classical Smagorinsky constant; MUST be > 0 or
                               # clem.do_stir aborts (nu_t == 0 => no eddy ever)
 
@@ -61,12 +61,12 @@ clem.couple_back        = 1   # SGS -> LES filtered (rho Y_k, rho e)
 clem.couple_back_energy = 1   # mode 1, conserved delta (ClemManager.H:54-63)
 clem.vol_renorm         = 1   # rescale each line to V_cell after the splice
 clem.regrid_int         = 1
-clem.do_react = 0             # non-reacting case
+clem.do_react = 1            # non-reacting case
 clem.do_diffusion           = 1
 clem.diffusion_cfl          = 0.5
 clem.diffusion_max_substeps = 1000
 clem.do_stir = 1
-
+cvode.solve_type = "GMRES"
 # Particle plotfiles (plt_clem_*/particles). Expensive in 3D: 3.69M elements.
 clem.plot_int = 0
 
@@ -76,7 +76,7 @@ amr.check_file = chk
 amr.check_per  = 5.0e-5
 
 amr.plot_files_output = 1
-amr.plot_file = plt
+amr.plot_file = plt_React
 amr.plot_per  = 1.0e-5
 amr.plot_vars        = density Temp
 amr.derive_plot_vars = x_velocity y_velocity z_velocity magvel magvort pressure MachNumber soundspeed

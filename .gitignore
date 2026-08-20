@@ -1,8 +1,9 @@
 /Exec/WORK/*
 .vscode/
 .DS_Store
-datlog
+datlog*
 mmslog
+*.log
 extremalog
 ic.txt
 plt*

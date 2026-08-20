@@ -491,9 +491,18 @@ get_wale_sfs_stresses(
   amrex::Real DijDij5 = DijDij3 * DijDij * DijDij;
   amrex::Real SijSij5 = SijSij * SijSij * SijSij * SijSij * SijSij;
 
+  // Fernando-Clem: guard the WALE denominator. With no resolved gradient
+  // (uniform IC, quiescent pocket) SijSij and DijDij are exactly zero, so this
+  // is 0/0 and mut comes out NaN, which then propagates through alpha0/1/2
+  // even where S = 0. mut = 0 is the correct limit. Same guard as
+  // clem::computeTurbViscosity (ClemStirring.cpp:248). Bug also present
+  // upstream (PeleC ac17bd0, Source/LES.H:494).
+  const amrex::Real wale_den =
+    std::sqrt(SijSij5) + std::sqrt(std::sqrt(DijDij5));
   const amrex::Real mut =
-    0.5 * (q(iv, QRHO) + q(ivm, QRHO)) * deltabar * deltabar *
-    (std::sqrt(DijDij3) / (std::sqrt(SijSij5) + std::sqrt(std::sqrt(DijDij5))));
+    (wale_den > 0.0) ? 0.5 * (q(iv, QRHO) + q(ivm, QRHO)) * deltabar *
+                         deltabar * std::sqrt(DijDij3) / wale_den
+                     : 0.0;
 
   alpha0 = 2.0 * mut * (S[dir][0] - (dir == 0 ? Skk / 3.0 : 0.0));
   alpha1 = 2.0 * mut * (S[dir][1] - (dir == 1 ? Skk / 3.0 : 0.0));

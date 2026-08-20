@@ -1,5 +1,6 @@
 #include "Diffusion.H"
 #include "prob.H"
+#include "WallModel.H"
 
 void
 PeleC::getMOLSrcTerm(
@@ -313,6 +314,51 @@ PeleC::getMOLSrcTerm(
                         *lprobparm);
                     });
                 }
+              }
+            }
+          }
+        }
+      }
+
+      // Fernando-Clem: equilibrium wall-stress model (pelec.do_wall_model).
+      // Rescales the tangential momentum flux already computed on the flagged
+      // no-slip domain-boundary faces so it carries the modelled tau_w
+      // instead of the under-resolved two-point molecular stress. See
+      // WallModel.H for the law and why it is applied as a scaling. Must run
+      // AFTER the interior flux computation above and BEFORE the fluxes are
+      // differenced.
+      if (do_wall_model) {
+        BL_PROFILE("PeleC::wall_model_fluxes()");
+        for (int dir = 0; dir < AMREX_SPACEDIM; dir++) {
+          if (
+            (typ == amrex::FabType::singlevalued) ||
+            (typ == amrex::FabType::regular)) {
+            const int normalarr[2] = {-1, 1};
+            const int active_arr[2] = {wall_model_lo[dir], wall_model_hi[dir]};
+            for (int inorm = 0; inorm < 2; inorm++) {
+              if (active_arr[inorm] == 0) {
+                continue;
+              }
+              const int normal = normalarr[inorm];
+              amrex::Box bbox = surroundingNodes(vbox, dir);
+              if (normal == -1) {
+                bbox.setBig(dir, geom.Domain().smallEnd(dir));
+              } else {
+                bbox.setSmall(dir, geom.Domain().bigEnd(dir) + 1);
+              }
+              if (bbox.ok()) {
+                const ProbParmDevice* lprobparm = PeleC::d_prob_parm_device;
+                auto const* ltransparm = trans_parms.device_parm();
+                const auto geomdata = geom.data();
+                const amrex::Real l_kappa = wall_model_kappa;
+                const amrex::Real l_B = wall_model_B;
+                auto const& flx_arr = flx[dir];
+                amrex::ParallelFor(
+                  bbox, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+                    pc_wall_model_fluxes(
+                      i, j, k, dir, normal, l_kappa, l_B, qar, flag_arr,
+                      flx_arr, geomdata, ltransparm, *lprobparm);
+                  });
               }
             }
           }

@@ -1,0 +1,173 @@
+# ============================================================================
+# CrossJet Case 1, REACTING.  CLEM + WALE, NO WALL MODEL.
+#
+# Isolation run: identical to inputs-case1-reacting-CLEM-WM.inp except
+# pelec.do_wall_model = 0. Its only job is to separate the wall model from the
+# SGS closure as the cause of the subsonic near-wall channel that lets the
+# flame walk upstream.
+#
+# WHAT TO LOOK FOR (the WM run crosses M = 1 in the wall row at x ~ 1.7 cm,
+# and at x = 3 cm the wall cell goes subsonic at t ~ 0.05 ms):
+#   * sonic crossing moves well DOWNSTREAM  -> the wall model's leading-edge
+#     over-drag (4.6x, KNOWN ISSUE 2) was opening the channel
+#   * sonic crossing stays where it is      -> the closure/grid is responsible,
+#     not the wall model
+# The question is answered by t ~ 0.3 ms; the rest of the window is for
+# comparison with the other two runs at matched times.
+# ============================================================================
+
+max_step  = 100000000
+stop_time = 10.0e-4          # same window as the no-model reference
+
+# ---------------------------------------------------------------- geometry --
+# CGS. 125 x 15 x 5 mm combustor, spanwise-periodic.
+geometry.is_periodic = 0 0 1
+geometry.coord_sys   = 0
+geometry.prob_lo     = 0.0   0.0  0.0
+geometry.prob_hi     = 12.5  1.5  0.5
+
+amr.n_cell           = 400 48 16       # dx = dy = dz = 0.3125 mm
+
+# --------------------------------------------------------------------- BCs --
+# xlo : supersonic vitiated-air inflow            (bcnormal)
+# ylo : adiabatic no-slip wall + H2 injector hole (bcnormal)
+# yhi : adiabatic no-slip wall
+# xhi : supersonic outflow (first-order extrapolation)
+# z   : periodic
+pelec.lo_bc = "UserBC"  "UserBC"      "Interior"
+pelec.hi_bc = "FOExtrap" "NoSlipWall"  "Interior"
+
+# ----------------------------------------------------------------- physics --
+pelec.do_hydro     = 1
+pelec.do_mol       = 1        # REQUIRED by CLEM
+pelec.mol_iorder   = 2
+pelec.diffuse_vel  = 1
+pelec.diffuse_temp = 1
+pelec.diffuse_spec = 1
+pelec.diffuse_enth = 1
+pelec.do_react     = 0        # the subgrid owns reaction
+pelec.chem_integrator = "ReactorNull"
+
+# ------------------------------------------------------------ SGS closure ---
+# WALE supplies the MOMENTUM closure that CLEM (a scalar closure) does not
+# provide, without Smagorinsky's undamped near-wall eddy viscosity.
+pelec.do_les       = 1
+pelec.les_model    = 2        # 2 = WALE  (0 = const Smagorinsky, 3 = Vreman)
+pelec.Cw           = 0.325    # Nicoud & Ducros; also feeds CLEM's stirring
+pelec.PrT          = 1.0e6    # ~kills the SGS heat flux; CLEM owns scalars
+pelec.Cs           = 0.16     # inert with WALE; only used if do_les is set 0
+
+# ------------------------------------------------------- wall-stress model --
+# Equilibrium (Spalding) wall model - Source/WallModel.H. Rescales the
+# tangential momentum flux on the flagged no-slip boundary faces so it carries
+# the modelled tau_w instead of the under-resolved two-point molecular stress.
+# The wall energy flux stays exactly zero (adiabatic); the kinetic energy
+# tau_w removes reappears as internal energy through the total-energy form.
+pelec.do_wall_model    = 0
+pelec.wall_model_lo    = 0 1 0    # ylo (injector hole excluded in prob.H)
+pelec.wall_model_hi    = 0 1 0    # yhi
+pelec.wall_model_kappa = 0.41
+pelec.wall_model_B     = 5.2
+
+# ------------------------------------------------------------- time stepping -
+pelec.cfl         = 0.1
+pelec.init_shrink = 0.1
+pelec.change_max  = 1.05
+pelec.dt_cutoff   = 1.e-14
+
+# ----------------------------------------------------------------- verbosity -
+pelec.v            = 1
+amr.v              = 1
+pelec.sum_interval = 10
+amr.data_log       = datlog_wale
+
+# -------------------------------------------------------------------- AMR ---
+# Single level: CLEM is restricted to max_level = 0.
+amr.max_level       = 0
+amr.blocking_factor = 16
+amr.max_grid_size   = 32      # -> 26 grids; use max_grid_size=16 for 75 grids
+
+# --------------------------------------------------------------------- CLEM -
+# THE MAXWELL CHAIN. Every knob below is set to its Maxwell-faithful value;
+# the stage numbering is the composition documented in ClemAlgorithm.H:14-32.
+# Do not change these without re-reading that header - several have measured,
+# rejected alternatives.
+clem.verbose = 1
+
+# stage 2 - LES->SGS isentropic pressure work, referenced to each element's
+# OWN stored pressure p_k (Maxwell element state, [M 3.2.2])
+clem.pressure_coupling  = 1
+
+# stage 3 - restore n_lem equal-mass elements every step. The mass-coordinate
+# discretisation is written for an equal-mass line; ClemAlgorithm.cpp:124
+# marks this MANDATORY every step.
+clem.regrid_int         = 1
+
+# stages 4-5 - diffusion and reaction CO-STEPPED (Maxwell [M 3.3.3] steps
+# 14-20): Delta t_diff from the diffusion CFL, reaction integrated right after
+# each diffusion substep, repeated until the LES dt is covered. Sequential
+# (Lie) splitting at SUBSTEP granularity, not two independent full-dt stages.
+# Both must be 1 for the co-stepping to exist.
+clem.do_diffusion           = 1
+clem.do_react               = 1
+clem.diffusion_cfl          = 0.5     # stability limit of the central stencil
+clem.diffusion_max_substeps = 1000
+
+# stage 6 - stirring. Rides INSIDE the 4-5 sub-cycle as a third clip on
+# Delta t_diff (a triplet map is instantaneous). Master switch only: every
+# number in the chain is a resolved-field quantity or a fixed constant of the
+# Chakravarthy & Menon [CM 5] eddy-size PDF, so there is nothing else to tune.
+# NOTE: nu_t comes from the active LES model = WALE here. See KNOWN ISSUE 3.
+clem.do_stir = 1
+
+# stage 8 - SGS->LES write-back. freeze_species=1 selects the Maxwell
+# CONSERVED-DELTA + PROJECTION mode (ClemLesCoupling.H:119): the LES does not
+# advect rho Y_k at all, the subgrid owns species.
+clem.freeze_species     = 1
+clem.couple_back        = 1
+clem.couple_back_energy = 1   # mode 1 = conserved delta. Mode 2 (keep-T) is
+                              # non-conservative by the formation energy of dY;
+                              # mode 0 leaves computeTemp to shift T.
+clem.vol_renorm         = 1   # multi-species analogue of Maxwell's perfect-gas
+                              # "equal p <=> equal rho e" identity
+
+cvode.solve_type = "GMRES"    # subgrid line reactor
+clem.plot_int = 0             # particle plotfiles off (3.69M elements in 3D)
+
+# Compile-time, for the record (Exec/RegTests/CrossJet/GNUmakefile):
+#   CLEM_MODEL = TRUE, CLEM_NLEM = 12
+#   CLEM_SPLICE_POLICY defaults to 0 = side_aware = Maxwell steps 23-24
+#   (policy 1, append_downstream, has a known artificial front diffusivity).
+#   Make.PeleC has no override for it, so the build is Maxwell by construction.
+
+# ------------------------------------------------------------------ output --
+amr.checkpoint_files_output = 1
+amr.check_file = chk_wale
+amr.check_per  = 5.0e-5
+
+amr.plot_files_output = 1
+amr.plot_file = plt_WALE
+amr.plot_per  = 1.0e-5
+amr.plot_vars        = density Temp
+amr.derive_plot_vars = x_velocity y_velocity z_velocity magvel magvort pressure MachNumber soundspeed
+pelec.plot_massfrac = 1
+pelec.plot_rhoy     = 0
+
+# ------------------------------------------------------- problem parameters --
+# Table 1 of the paper, Case 1. CGS: 1 atm = 1.01325e6 dyn/cm^2.
+prob.p_in   = 1.01325e6      # 1 atm
+prob.T_in   = 1000.0         # K
+prob.u_in   = 9.30e4         # 930 m/s -> M = 1.5
+prob.YO2_in = 0.23
+prob.YN2_in = 0.77
+
+prob.p_jet  = 1.30709e6      # 1.29 atm
+prob.T_jet  = 300.0          # K
+prob.v_jet  = 1.321e5        # 1321 m/s -> M ~ 1.0
+prob.jet_x  = 4.2            # 42 mm from the inlet
+prob.jet_z  = 0.25           # spanwise centre
+prob.jet_d  = 0.1            # 1 mm diameter
+prob.jet_start = 0.0
+prob.jet_ramp  = 1.0e-5
+
+eb2.geom_type = "all_regular"

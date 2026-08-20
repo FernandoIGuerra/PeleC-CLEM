@@ -76,6 +76,26 @@ pp.query("do_isothermal_walls", do_isothermal_walls);
     domhi_isothermal_temp[i] = tmp[i];
   }
 }
+// Fernando-Clem: equilibrium wall-stress model (see WallModel.H). The
+// wall_model_lo/hi arrays flag, per direction, which no-slip domain boundaries
+// the model is applied to, e.g. "0 1 0" = both y walls in 3D.
+pp.query("do_wall_model", do_wall_model);
+pp.query("wall_model_kappa", wall_model_kappa);
+pp.query("wall_model_B", wall_model_B);
+{
+  amrex::Vector<int> tmp(AMREX_SPACEDIM, 0);
+  pp.queryarr("wall_model_lo", tmp, 0, AMREX_SPACEDIM);
+  for (int i = 0; i < tmp.size(); i++) {
+    wall_model_lo[i] = tmp[i];
+  }
+}
+{
+  amrex::Vector<int> tmp(AMREX_SPACEDIM, 0);
+  pp.queryarr("wall_model_hi", tmp, 0, AMREX_SPACEDIM);
+  for (int i = 0; i < tmp.size(); i++) {
+    wall_model_hi[i] = tmp[i];
+  }
+}
 pp.query("do_les", do_les);
 pp.query("use_explicit_filter", use_explicit_filter);
 pp.query("Cs", Cs);

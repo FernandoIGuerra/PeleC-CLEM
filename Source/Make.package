@@ -48,6 +48,7 @@ CEXE_headers += Transport.H
 CEXE_headers += MOL.H
 CEXE_headers += Riemann.H
 CEXE_headers += LES.H
+CEXE_headers += WallModel.H
 CEXE_headers += WENO.H
 CEXE_headers += EBStencilTypes.H
 CEXE_headers += EB.H
